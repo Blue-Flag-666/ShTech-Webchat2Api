@@ -2,6 +2,8 @@
 *
 !Dockerfile
 !package.json
+!THIRD_PARTY_LICENSES/
+!THIRD_PARTY_LICENSES/Node.js.txt
 !server.mjs
 !transport.mjs
 !models.mjs

@@ -6,7 +6,7 @@ RUN apk add --no-cache ca-certificates libstdc++ \
   && addgroup -g 1000 node \
   && adduser -u 1000 -G node -s /sbin/nologin -D node
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-COPY --from=node-runtime /usr/local/LICENSE /usr/local/LICENSE
+COPY THIRD_PARTY_LICENSES/Node.js.txt /usr/share/licenses/nodejs/LICENSE
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
