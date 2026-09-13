@@ -1,4 +1,4 @@
-FROM node:22-alpine
+FROM node:26.8.2-alpine
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
@@ -6,7 +6,7 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 # Runtime-only image: the proxy has no npm dependencies.
-COPY --chown=node:node package.json server.mjs transport.mjs models.mjs auth.mjs tools.mjs protocols.mjs lifecycle.mjs .env.example ./
+COPY --chown=node:node package.json server.mjs transport.mjs models.mjs auth.mjs tools.mjs protocols.mjs structured.mjs lifecycle.mjs .env.example ./
 USER node
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

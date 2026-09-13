@@ -8,5 +8,6 @@
 !auth.mjs
 !tools.mjs
 !protocols.mjs
+!structured.mjs
 !lifecycle.mjs
 !.env.example

@@ -4,7 +4,7 @@
 
 | 运行环境 | 方式 | 验证状态 |
 |---|---|---|
-| Windows amd64 | Node.js 22+ 原生 | 本地测试通过 |
+| Windows amd64 | Node.js 26+ 原生 | GitHub Actions `windows-latest` 测试通过 |
 | Windows Docker Desktop | WSL2/Linux 容器后端 | 已配置，待实际 Docker 构建和启动验证 |
 | Linux amd64 | Docker 或 Node.js | GitHub Actions 构建、测试与容器启动通过 |
 | 树莓派 arm64（64 位系统） | Docker 或 Node.js | arm64 镜像在 QEMU 下构建、测试与启动通过；树莓派实机待测 |

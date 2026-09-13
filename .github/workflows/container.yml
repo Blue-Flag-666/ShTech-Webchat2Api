@@ -19,10 +19,10 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
         with:
-          node-version: '22'
+          node-version: '26.8.2'
       - run: node --test
   image-test:
     needs: test
@@ -31,10 +31,10 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-qemu-action@v4.3.0
+      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: docker/build-push-action@v7.3.0
         with:
           context: .
           platforms: linux/${{ matrix.arch }}
@@ -67,15 +67,15 @@ jobs:
       packages: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-qemu-action@v4.3.0
+      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v6
+      - uses: docker/metadata-action@v6.2.0
         id: meta
         with:
           images: ${{ env.IMAGE }}
@@ -83,7 +83,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@v7.3.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64

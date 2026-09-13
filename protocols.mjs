@@ -17,7 +17,7 @@ export function normalizeRequest(path, input) {
   if (path === '/v1/chat/completions') return input;
   const out = { model: input.model, stream: input.stream, messages: [] };
   if (path === '/v1/responses') {
-    keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning']);
+    keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning','text']);
     if (input.store === true || input.previous_response_id != null) throw bad('当前 Responses 为无状态接口，请使用 store:false 并传入完整历史');
     if (input.store !== undefined && typeof input.store !== 'boolean') throw bad('store 必须为布尔值');
     if (input.instructions != null) out.messages.push({role:'system',content:text(input.instructions)});
@@ -48,7 +48,7 @@ export function normalizeRequest(path, input) {
       ? {type:input.tool_choice.type,function:{name:input.tool_choice.name}} : input.tool_choice;
     out.max_tokens = input.max_output_tokens;
   } else {
-    keys(input, ['model','messages','system','stream','max_tokens','tools','tool_choice','metadata','thinking']);
+    keys(input, ['model','messages','system','stream','max_tokens','tools','tool_choice','metadata','thinking','output_config']);
     if (!Number.isInteger(input.max_tokens) || input.max_tokens < 1) throw bad('max_tokens 必须为正整数');
     out.max_tokens = input.max_tokens;
     if (input.system != null) out.messages.push({role:'system',content:text(input.system,['text'])});

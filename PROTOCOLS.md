@@ -20,7 +20,9 @@ Responses 为无状态适配，不存储聊天记录。下一轮传入完整 inp
 
 支持文本、function 工具和上游返回的推理摘要。Responses 将 `reasoning_content` 映射为 reasoning item 及 summary 流事件；Messages 映射为 thinking 内容块。历史中的 reasoning summary/thinking 块会作为带标记的 assistant 摘要送回上游。空 `signature` 只是协议兼容占位，不是 Anthropic 签名；请求中的推理强度不会传给学校上游。
 
-图片、音频、内置搜索工具、JSON Schema 强制输出以及有状态 Responses 尚未支持。未实现的请求参数返回 400；不伪装为已执行。max_tokens 传给学校接口，尚未证明上游严格执行该限制。
+支持 Chat `response_format`、Responses `text.format` 和 Messages `output_config.format` 的 `json_object` / `json_schema`。实现方式是注入格式提示并在本地解析、验证常用 JSON Schema 约束；由于学校上游没有已确认的约束解码，这不保证模型首次生成就合规。流式请求会缓冲到验证成功后再输出，失败返回错误且不发送成功结束事件。未知 schema 关键字和外部 `$ref` 会被拒绝。
+
+图片、音频、内置搜索工具以及有状态 Responses 尚未支持。未实现的请求参数返回 400；不伪装为已执行。max_tokens 传给学校接口，尚未证明上游严格执行该限制。
 
 2026-09-13 已通过学校 Qwen 验证三个协议的文本 JSON/SSE 和 echo 工具往返。可运行 `node --env-file=.env live-verify.mjs --cas` 复测；脚本会登录学校并发送 12 个测试请求，使用账号额度。该结果不代表任意工具、模型或客户端均已验证。工具提示使用普通 `<api_tool_call>` 文本标签；真实测试中 Qwen 对原 `<tool_call>` 提示返回空正文，故不再以该标签引导生成。
 

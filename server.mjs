@@ -7,6 +7,7 @@ import { TokenManager, secret } from './auth.mjs';
 import { toolPolicy, toolPrompt, normalizeMessages, parseToolCalls } from './tools.mjs';
 import { normalizeRequest, ProtocolOutput } from './protocols.mjs';
 import { shutdown } from './lifecycle.mjs';
+import { outputPolicy, outputPrompt, parseStructured } from './structured.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
 const error = (status, message) => Object.assign(new Error(message), { status });
@@ -19,20 +20,20 @@ export function configuration(env = process.env) {
     netGo: bool(env.GENAI_NET_GO), timeout: Number(env.GENAI_TIMEOUT_MS || 120000), modelTtl: Number(env.GENAI_MODEL_TTL_MS || 300000) };
 }
 
-export function upstreamBody(input, config, supportedModels) {
+export function upstreamBody(input, config, supportedModels, formatPolicy=null) {
   const allowed = supportedModels?.length ? supportedModels : [{ id: 'qwen-instruct', root_ai_type: 'xinference' }];
   const selected = allowed.find(x => (typeof x === 'string' ? x : x.id) === (input.model ?? 'qwen-instruct'));
   if (!selected) throw error(400, `模型不可用：${input.model}`);
   const messages = normalizeMessages(input.messages, toolPolicy(input.tools,input.tool_choice));
   if (messages.at(-1).role !== 'user') throw error(400, '最后一条消息必须为 user 或工具结果');
-  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','chat_group_id','net_go','tools','tool_choice'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
+  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','chat_group_id','net_go','tools','tool_choice','response_format'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
   if (input.stream !== undefined && typeof input.stream !== 'boolean') throw error(400, 'stream 必须是布尔值');
   if (input.net_go !== undefined && typeof input.net_go !== 'boolean') throw error(400, 'net_go 必须是布尔值');
   const max = input.max_tokens ?? 16384;
   if (!Number.isInteger(max) || max < 1 || max > 16384) throw error(400, 'max_tokens 必须是 1–16384 的整数');
   const group = input.chat_group_id ?? config.group;
   if (typeof group !== 'string' || !group.trim()) throw error(400, '请配置 GENAI_CHAT_GROUP_ID 或传入 chat_group_id');
-  const instructions=toolPrompt(toolPolicy(input.tools,input.tool_choice));
+  const instructions=[toolPrompt(toolPolicy(input.tools,input.tool_choice)),outputPrompt(formatPolicy)].filter(Boolean).join('\n\n');
   const chatInfo=instructions ? `${instructions}\n\nUser request:\n${messages.at(-1).content}` : messages.at(-1).content;
   return { chatInfo, messages: messages.slice(0, -1),
     type: '3', stream: true, aiType: input.model ?? 'qwen-instruct', aiSecType: '1',
@@ -163,6 +164,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const rawInput = await readBody(req);
       if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) throw error(400, '请求必须是 JSON 对象');
       const input = normalizeRequest(req.url,rawInput);
+      const formatPolicy=outputPolicy(req.url,rawInput);
       const adapter = req.url === '/v1/chat/completions' ? null : new ProtocolOutput(req.url,input,async frame=>{
         if (!res.headersSent) res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
         await write(res,frame);
@@ -170,7 +172,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const policy = toolPolicy(input.tools,input.tool_choice);
       const catalogue = await models();
       if (!catalogue.length) throw error(503, '模型目录没有已确认的自部署国内模型');
-      const body = upstreamBody(input, config, catalogue);
+      const body = upstreamBody(input, config, catalogue, formatPolicy);
       if (busy) throw error(429, '当前账号有请求进行中，请完成后重试');
       busy = true; acquired = true;
       controller = new AbortController();
@@ -198,11 +200,11 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         if (typeof thought !== 'string') throw error(502, '上游返回无效推理字段');
         responseBytes += Buffer.byteLength(content) + Buffer.byteLength(thought);
         if (responseBytes > 8 * 1024 * 1024) throw error(502, '上游响应超过 8 MiB');
-        if (!input.stream || policy) text += content;
-        if (!input.stream || policy) reasoning += thought;
+        if (!input.stream || policy || formatPolicy) text += content;
+        if (!input.stream || policy || formatPolicy) reasoning += thought;
         if (choice?.finish_reason != null) finished = true;
         last = { ...last, ...chunk, choices: choice ? chunk.choices : last?.choices };
-        if (input.stream && !policy) {
+        if (input.stream && !policy && !formatPolicy) {
           if (adapter) { await adapter.reasoningDelta(thought); await adapter.delta(content); }
           else {
             if (!res.headersSent) res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
@@ -211,9 +213,10 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         }
       }
       if (!seen || !finished) throw error(502, '上游流意外结束，未收到完成标记');
-      const parsed = parseToolCalls(adapter && input.stream && !policy ? adapter.text : text,policy,()=>`call_${randomUUID().replaceAll('-','')}`);
+      const parsed = parseToolCalls(adapter && input.stream && !policy && !formatPolicy ? adapter.text : text,policy,()=>`call_${randomUUID().replaceAll('-','')}`);
+      if(!parsed.tool_calls.length) parsed.content=parseStructured(parsed.content,formatPolicy);
       const finish = parsed.tool_calls.length ? 'tool_calls' : last.choices?.[0]?.finish_reason || 'stop';
-      const finalReasoning=adapter && input.stream && !policy ? adapter.reasoning : reasoning;
+      const finalReasoning=adapter && input.stream && !policy && !formatPolicy ? adapter.reasoning : reasoning;
       const completion = { id: last.id || `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: last.created || Math.floor(Date.now()/1000), model: input.model || last.model || 'qwen-instruct', choices: [{ index: 0, message: { role: 'assistant', content: parsed.content, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls}:{}) }, finish_reason: finish }], ...(last.usage ? { usage: last.usage } : {}) };
       if (adapter) {
         const result = await adapter.finish(completion,input.stream);
@@ -221,7 +224,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         else { res.setHeader('X-Usage-Source',last.usage ? 'upstream' : 'estimate'); json(res,200,result); }
         return;
       }
-      if (input.stream && policy) {
+      if (input.stream && (policy || formatPolicy)) {
         res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
         const delta = { role:'assistant', ...(parsed.content ? {content:parsed.content}:{}), ...(reasoning?{reasoning_content:reasoning}:{}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls.map((t,index)=>({...t,index}))}:{}) };
         await write(res,`data: ${JSON.stringify({...last,choices:[{index:0,delta,finish_reason:null}]})}\n\n`);
