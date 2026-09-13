@@ -185,7 +185,7 @@ test('非流式保留独立推理字段',async()=>{
 test('工具调用通过 HTTP 转换为 function call，流式也正常结束',async()=>{
   const tools=[{type:'function',function:{name:'weather',parameters:{type:'object'}}}];
   for(const stream of [false,true]) await withServer(async(url,options)=>{
-    assert.match(JSON.parse(options.body).messages[0].content,/Tool declarations/);
+    assert.match(JSON.parse(options.body).chatInfo,/Tool declarations/);
     return new Response(sse([chunk('<tool_call>{"name":"weather","arguments":{"city":"上海"}}</tool_call>','stop')]),{headers:{'Content-Type':'text/event-stream'}});
   },async call=>{
     const res=await call({...request,tools,tool_choice:'required',stream});assert.equal(res.status,200);

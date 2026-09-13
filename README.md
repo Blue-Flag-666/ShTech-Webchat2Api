@@ -2,7 +2,7 @@
 
 同类 GitHub 项目比较见 [GITHUB_COMPARISON.md](GITHUB_COMPARISON.md)。多架构 Docker 部署见 [compose.yaml](compose.yaml)。
 
-Windows Docker Desktop、Linux、树莓派与当前验证状态见 [DEPLOYMENT.md](DEPLOYMENT.md)。GHCR 工作流已配置，但镜像尚未发布。
+Windows Docker Desktop、Linux、树莓派与验证状态见 [DEPLOYMENT.md](DEPLOYMENT.md)。GHCR 镜像已发布并验证可匿名读取，包含 linux/amd64 和 linux/arm64。
 
 将学校 Webchat 适配为 `/v1/chat/completions`、`/v1/responses` 和 `/v1/messages`。支持文本、工具调用、SSE 流式和非流式响应，无第三方运行依赖，需要 Node.js 22 或更新版本。
 
@@ -36,7 +36,7 @@ console.log(await response.json());
 - `GET /healthz` 不需要密钥，仅用于 Docker/Kubernetes liveness 检查；对外使用时仍应通过端口绑定或反向代理限制访问。
 - 上游始终请求流式输出；非流式由本地汇总。最后一条 user 消息映射为 `chatInfo`，其余历史映射为 `messages`。
 - 可用参数：`model`、`messages`、`stream`、`max_tokens`（1–16384）、`chat_group_id`、`net_go`、`tools`、`tool_choice`。支持文本 user/assistant/system/developer 和配对的工具结果。
-- 工具调用通过提示词声明和 `<tool_call>` JSON 解析实现，尚未真实模型验证。带工具声明的流式请求会先缓冲完整回答，解析成功后输出工具分块；错误格式、未知工具及 required 未遵循会报错。代理不会执行工具。
+- 工具调用通过当前请求中的提示词声明和 `<api_tool_call>` JSON 解析实现；旧 `<tool_call>` 输出也可解析。Qwen 已真实验证三个协议的工具调用及结果回传。带工具声明的流式请求先缓冲完整回答，解析成功后输出工具分块；错误格式、未知工具及 required 未遵循会报错。代理不会执行工具。
 - Responses 支持文本 input、instructions、function 工具及调用结果历史；Messages 支持文本、system、tool_use/tool_result 和 `x-api-key` 鉴权。两个协议均有流式与非流式实现，详见 [PROTOCOLS.md](PROTOCOLS.md)。
 - 图片、结构化输出及这两个协议的独立推理块仍待实现，不宣称完整兼容所有客户端。
 - CAS/OAuth 自动登录已通过真实账号登录验证（2026-09-13）。可配置 `GENAI_USERNAME` / `GENAI_PASSWORD`，也支持 `_FILE` secret 文件；仅 JWT 模式仍需手动更新过期凭证。当前需要网页会话 ID；若上游需要 Cookie，可填写 `GENAI_COOKIE`。
@@ -51,7 +51,8 @@ console.log(await response.json());
 镜像是基于 `node:22-alpine` 的无依赖运行时，GitHub Actions 会构建并发布 `linux/amd64` 和 `linux/arm64` manifest。将 `.env.example` 复制为 `.env` 并填写凭证后：
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d --no-build
 docker compose logs -f
 ```
 

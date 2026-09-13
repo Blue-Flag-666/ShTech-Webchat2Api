@@ -4,7 +4,7 @@ import { normalizeMessages, parseToolCalls, toolPolicy } from './tools.mjs';
 const tools=[{type:'function',function:{name:'weather',parameters:{type:'object',properties:{city:{type:'string'}}}}}];
 test('工具调用解析保留标识与 JSON 参数',()=>{
   const policy=toolPolicy(tools,'required');
-  const result=parseToolCalls('<tool_call>{"name":"weather","arguments":{"city":"上海"}}</tool_call>',policy,()=> 'call_test');
+  const result=parseToolCalls('<api_tool_call>{"name":"weather","arguments":{"city":"上海"}}</api_tool_call>',policy,()=> 'call_test');
   assert.equal(result.content,null);assert.equal(result.tool_calls[0].id,'call_test');
   assert.deepEqual(JSON.parse(result.tool_calls[0].function.arguments),{city:'上海'});
 });

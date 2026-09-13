@@ -24,12 +24,12 @@ export function toolPolicy(tools, choice = 'auto') {
 }
 export function toolPrompt(policy) {
   if (!policy) return '';
-  return `You may request external tools by emitting exactly one or more blocks in this format:\n<tool_call>{"name":"tool_name","arguments":{}}</tool_call>\nUse only the declared tools and JSON objects for arguments. Do not claim to have executed tools. ${policy.required ? 'You must request at least one tool.' : 'If no tool is needed, reply normally.'}\nTool declarations:\n${JSON.stringify(policy.tools.map(t=>t.function))}`;
+  return `You may request external tools by writing literal text blocks in this format:\n<api_tool_call>{"name":"tool_name","arguments":{}}</api_tool_call>\nUse only the declared tools and JSON objects for arguments. Do not claim to have executed tools. ${policy.required ? 'You must write at least one api_tool_call block.' : 'If no tool is needed, reply normally.'}\nTool declarations:\n${JSON.stringify(policy.tools.map(t=>t.function))}`;
 }
 export function parseToolCalls(text, policy, makeId) {
   if (!policy) return { content: text, tool_calls: [] };
   const calls = [];
-  const content = text.replace(/<tool_call>([\s\S]*?)<\/tool_call>/g, (_,raw)=>{
+  const content = text.replace(/<(api_tool_call|tool_call)>([\s\S]*?)<\/\1>/g, (_,tag,raw)=>{
     let parsed;
     try { parsed=JSON.parse(raw); } catch { throw upstreamError('模型输出了无法解析的工具调用'); }
     if (!policy.allowed.has(parsed.name) || !parsed.arguments || typeof parsed.arguments !== 'object' || Array.isArray(parsed.arguments)) throw upstreamError('模型输出了不允许的工具或无效参数');
@@ -37,14 +37,13 @@ export function parseToolCalls(text, policy, makeId) {
     if (calls.length > 64) throw upstreamError('模型工具调用数量超过限制');
     return '';
   }).trim();
-  if (content.includes('<tool_call>') || content.includes('</tool_call>')) throw upstreamError('工具调用块未完整结束');
+  if (/<\/?(?:api_tool_call|tool_call)>/.test(content)) throw upstreamError('工具调用块未完整结束');
   if (policy.required && !calls.length) throw upstreamError('模型未遵循 required 工具调用约束');
   return { content: content || null, tool_calls: calls };
 }
 export function normalizeMessages(messages, policy) {
   if (!Array.isArray(messages) || !messages.length) throw invalid('messages 必须是非空数组');
   const result=[]; const pending=new Set();
-  const prompt=toolPrompt(policy); if(prompt) result.push({role:'system',content:prompt});
   for(const m of messages) {
     if(!m || !['user','assistant','system','developer','tool'].includes(m.role)) throw invalid('不支持的消息角色');
     if(m.role==='tool') {
@@ -59,7 +58,7 @@ export function normalizeMessages(messages, policy) {
       for(const tc of m.tool_calls) {
         if(typeof tc.id!=='string' || pending.has(tc.id) || tc.type!=='function' || typeof tc.function?.name!=='string') throw invalid('无效的历史 tool_calls');
         let args;try{args=JSON.parse(tc.function.arguments);}catch{throw invalid('历史工具参数必须是 JSON');}
-        pending.add(tc.id);content+=`\n<tool_call>${JSON.stringify({name:tc.function.name,arguments:args})}</tool_call>`;
+        pending.add(tc.id);content+=`\n<api_tool_call>${JSON.stringify({name:tc.function.name,arguments:args})}</api_tool_call>`;
       }
     }
     result.push({role:m.role==='developer'?'system':m.role,content});

@@ -1,6 +1,6 @@
 # GitHub 同类项目比较
 
-检索日期：2026-09-12。重点比较了直接访问 `genai.shanghaitech.edu.cn/htk` 的项目；只把仓库 README、源码和测试中明确出现的能力列为已实现。
+参考项目检索日期：2026-09-12；本项目状态更新：2026-09-13。重点比较直接访问 `genai.shanghaitech.edu.cn/htk` 的项目。以下参考项目描述是源码/文档观察，不等于全部真实调用验证。
 
 ## 直接相关项目
 
@@ -8,9 +8,9 @@
 |---|---|---|---|---|
 | [ShanghaitechGeekPie/GenAI2OpenAI](https://github.com/ShanghaitechGeekPie/GenAI2OpenAI) | Flask；OpenAI Chat Completions | JWT 或学号密码 | 原始基线；流式/非流式、模型列表、基础 OpenAI 兼容 | 当前项目的上游请求验证和最小实现更小；该项目模型和协议覆盖更广，但 README 自称维护动力较低 |
 | [HeZeBang/GenAI2OpenAI](https://github.com/HeZeBang/GenAI2OpenAI) | Flask；`/v1/chat/completions`、`/v1/responses`、`/v1/messages` | JWT 或 CAS 自动登录/刷新 | 多模型适配、推理字段、图片、工具调用、Responses、Docker、动态模型列表 | 功能最完整，适合借鉴模型注册、token 刷新和多协议设计；复杂度和上游假设也最高 |
-| [cmjang/shanghaitech-genai2api](https://github.com/cmjang/shanghaitech-genai2api) | Python/uv；OpenAI + Anthropic | JWT 或学号密码 | Claude Code 适配、自动刷新、工具调用提示词转换、动态模型 | 是较新的独立实现；与当前项目相比提供 Anthropic 接口和凭证登录，但仍依赖同一 JWT/网页上游 |
+| [cmjang/shanghaitech-genai2api](https://github.com/cmjang/shanghaitech-genai2api) | Python/uv；OpenAI + Anthropic | JWT 或学号密码 | Claude Code 适配、自动刷新、工具调用提示词转换、动态模型 | 可参考 Claude Code 和凭证登录设计；当前项目也已实现 Messages 和自动登录 |
 | [jollyxenon/shanghaitech-genai2api](https://github.com/jollyxenon/shanghaitech-genai2api) | Python/pixi；OpenAI Chat、Responses + Anthropic Messages | JWT 或 CAS | 面向 Claude Code 和 Codex；Responses 支持 `function_call`、`custom_tool_call`、reasoning 事件；自动刷新、动态模型列表、上下文探测和速度基准 | 比 cmjang 的公开说明更明确地补齐 Codex Responses；代价是 Responses 只做兼容子集、无服务端 response storage、工具调用依赖 prompt 注入和文本解析 |
-| [Rainy-14b/GenAI2Codex](https://github.com/Rainy-14b/GenAI2Codex) | Python/uv；重点兼容 OpenAI Responses | JWT | Codex 配置、Responses、模型适配、字符修正 | 对 Codex 更方便，但 README 明确仍在开发 Anthropic；当前项目已验证 Chat Completions，尚未实现 Responses |
+| [Rainy-14b/GenAI2Codex](https://github.com/Rainy-14b/GenAI2Codex) | Python/uv；重点兼容 OpenAI Responses | JWT | Codex 配置、Responses、模型适配、字符修正 | 可参考 Codex 专项适配；当前项目也已有无状态 Responses 文本和 function 工具接口 |
 
 ## 当前项目的实际位置
 
@@ -21,13 +21,13 @@
 - 本地 Bearer API key、请求大小限制、单请求并发限制、客户端断开取消、超时和错误事件。
 - 学校上游不规范 CSP 响应头的兼容处理；固定上游、TLS 校验保持开启、不跟随重定向。
 
-与 GitHub 上成熟实现相比，当前项目明确暂不支持：自动 CAS 登录/刷新、动态模型目录、多模型路由、Anthropic Messages、OpenAI Responses、图片上传、工具调用和 reasoning 字段。
+2026-09-13 已进一步真实验证 CAS/OAuth 自动登录、国内自部署模型目录，以及三个协议的文本 JSON/SSE 和 function 工具往返。Chat 可保留 reasoning_content。Windows/Linux CI 与 amd64/arm64 镜像测试通过，GHCR 已发布且可匿名读取 manifest。仍缺少图片、Responses/Messages 独立推理块、custom tools 和广泛客户端实测；不能宣称比参考项目完整。
 
 ## 值得吸收的设计
 
-1. **token 管理**：HeZeBang 和 cmjang 都支持学号密码 CAS 登录，并在 JWT 过期后刷新。当前项目只接受已抓取的 JWT；如果长期运行，这是最优先的增强项。不要直接把密码放入现有 `.env`，应使用独立的 keystore 或系统凭证存储。
-2. **动态模型列表**：相关项目使用 `GET /htk/ai/aiModel/list`，而当前 `/v1/models` 只有固定的 `qwen-instruct`。接入前应先读取并记录真实返回结构，不能照搬模型名称映射。
-3. **SSE 失败处理**：成熟项目会识别上游首帧的 token 失效/业务错误，并在开始输出前重试或返回标准错误。当前项目已拒绝无完成标记的截断流，但还可以增加上游业务错误 JSON 的识别。
+1. **token 管理**：已实现账号密码登录、JWT 过期刷新、HTTP/SSE 登录失效时最多一次重试。支持本地忽略提交的 .env 与 `_FILE` secrets；刷新 token 只保留在内存。
+2. **动态模型列表**：已读取真实目录，仅保留国内家族且 rootAiType 为 xinference 的记录；首次目录失败返回空列表，已确认目录可短暂缓存。
+3. **SSE 失败处理**：已识别首帧登录失效并在输出前重试，截断流返回错误；输出后不重试。业务错误和不同模型的非标准字段仍需持续兼容。
 4. **协议扩展**：如果目标是 Codex，优先参考 GenAI2Codex 的 Responses 接口；如果目标是 Claude Code，优先参考 cmjang/HeZeBang 的 Anthropic Messages 转换。两者都不应在没有真实回归测试前直接合并。
 5. **测试隔离**：HeZeBang 的测试把本地 mock、上游 transport 和显式 live 测试分开。当前项目已有 mock 端到端测试和真实 `verify.mjs`，可以沿用这个边界。
 
@@ -41,7 +41,7 @@ jollyxenon 不是只增加一个别名：它把三个协议放在同一个代理
 
 ## 结论
 
-当前实现已经完成“把网页聊天转为可调用的本地 OpenAI Chat Completions API”，并且真实调用过上游。GitHub 上的 HeZeBang/GenAI2OpenAI 是功能最完整的参考实现；cmjang/shanghaitech-genai2api 更适合作为 Claude Code 和自动登录参考；Rainy-14b/GenAI2Codex 更适合作为 Responses/Codex 参考。直接替换为这些项目没有必要：它们的优势集中在额外协议、模型适配和登录管理，而当前项目的优势是依赖少、行为边界清楚、真实 SSE 已验证。
+本项目的重点是零第三方运行依赖、国内自部署模型筛选、可复测的真实登录与三协议工具往返，以及双架构 GHCR 发布。参考项目在特定客户端、图片、推理和自定义工具方面仍有值得吸收的实现。具体支持边界以 [PROTOCOLS.md](PROTOCOLS.md) 和 [DEPLOYMENT.md](DEPLOYMENT.md) 为准。
 
 ## 来源与可复核证据
 

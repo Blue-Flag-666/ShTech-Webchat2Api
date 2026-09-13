@@ -29,7 +29,7 @@ docker compose up -d --build
 docker compose logs --tail 100
 ```
 
-目前 GHCR 尚未发布，因此使用本地构建。发布完成后的目标为 `ghcr.io/blue-flag-666/shtech-webchat2api:latest`，同一个标签应包含两个架构。届时可使用 `docker compose pull` 和 `docker compose up -d --no-build`。
+GHCR 已发布 `ghcr.io/blue-flag-666/shtech-webchat2api:latest`，同一标签包含 linux/amd64 和 linux/arm64，并已匿名读取 manifest 验证。使用 `docker compose pull` 和 `docker compose up -d --no-build` 可跳过本地构建。
 
 非容器运行：`node --env-file=.env server.mjs`。客户端 Base URL 为 `http://127.0.0.1:8787/v1`。
 
@@ -48,4 +48,4 @@ docker compose logs --tail 100
 
 ## 尚未完成
 
-Responses 和 Anthropic Messages 的文本、流式及工具适配已通过本地 HTTP 测试；图片、独立推理块和完整客户端兼容仍待完善。工具调用尚未通过真实模型验证。双架构镜像已通过 CI 构建及启动测试，GHCR 发布和匿名拉取仍在验证。
+三个协议均已使用学校 Qwen 真实验证文本 JSON、文本 SSE、工具调用及结果回传。图片、独立推理块和完整客户端兼容仍待完善。双架构镜像已通过 CI 构建及启动测试，GHCR 已发布；本机 Windows 的 WSL 缺少虚拟机支持，Docker Desktop 实机启动及树莓派实机资源表现仍待验证。

@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { fetchModelList, upstreamFetch } from './transport.mjs';
 import { modelDirectory } from './models.mjs';
 import { TokenManager, secret } from './auth.mjs';
-import { toolPolicy, normalizeMessages, parseToolCalls } from './tools.mjs';
+import { toolPolicy, toolPrompt, normalizeMessages, parseToolCalls } from './tools.mjs';
 import { normalizeRequest, ProtocolOutput } from './protocols.mjs';
 import { shutdown } from './lifecycle.mjs';
 
@@ -32,7 +32,9 @@ export function upstreamBody(input, config, supportedModels) {
   if (!Number.isInteger(max) || max < 1 || max > 16384) throw error(400, 'max_tokens 必须是 1–16384 的整数');
   const group = input.chat_group_id ?? config.group;
   if (typeof group !== 'string' || !group.trim()) throw error(400, '请配置 GENAI_CHAT_GROUP_ID 或传入 chat_group_id');
-  return { chatInfo: messages.at(-1).content, messages: messages.slice(0, -1),
+  const instructions=toolPrompt(toolPolicy(input.tools,input.tool_choice));
+  const chatInfo=instructions ? `${instructions}\n\nUser request:\n${messages.at(-1).content}` : messages.at(-1).content;
+  return { chatInfo, messages: messages.slice(0, -1),
     type: '3', stream: true, aiType: input.model ?? 'qwen-instruct', aiSecType: '1',
     chatGroupId: group, promptTokens: 0, imageUrl: '', imageUrls: [], width: '', height: '',
     rootAiType: selected.root_ai_type || 'xinference', maxToken: max, netGo: input.net_go ?? config.netGo };
