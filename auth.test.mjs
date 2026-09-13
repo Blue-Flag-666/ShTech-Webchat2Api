@@ -1,6 +1,37 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loginCas, TokenManager } from './auth.mjs';
+import { loginCas, TokenManager, encryptPassword } from './auth.mjs';
+import { createDecipheriv } from 'node:crypto';
+
+test('CAS 加密前缀和 IV 保持 ASCII，解密后密码字符边界不变',()=>{
+  for(let i=0;i<20;i++) {
+    const cipher=encryptPassword('密码-test','1234567890123456');
+    const decrypt=createDecipheriv('aes-128-cbc',Buffer.from('1234567890123456'),Buffer.from('0000000000000000'));
+    const plain=Buffer.concat([decrypt.update(Buffer.from(cipher,'base64')),decrypt.final()]).toString('utf8');
+    assert.equal(plain.slice(64),'密码-test');
+  }
+});
+
+test('学校 OAuth 跳转链取得 token，不向外部域名发送凭据',async()=>{
+  const redirects=[
+    'https://genai.shanghaitech.edu.cn/htk/oauth/callback',
+    'https://ids.shanghaitech.edu.cn/authserver/oauth2.0/authorize',
+    'https://ids.shanghaitech.edu.cn/authserver/login',
+    null,
+    'https://ids.shanghaitech.edu.cn/authserver/oauth2.0/callbackAuthorize',
+    'https://ids.shanghaitech.edu.cn/authserver/oauth2.0/authorize',
+    'https://genai.shanghaitech.edu.cn/htk/oauth/callback',
+    'https://genai.shanghaitech.edu.cn/dashboard/analysis?token=mock-oauth-token'
+  ];
+  let index=0;
+  const token=await loginCas('user','password',async(url,options)=>{
+    assert.ok(['genai.shanghaitech.edu.cn','ids.shanghaitech.edu.cn'].includes(new URL(url).hostname));
+    const location=redirects[index++];
+    if(location)return new Response(null,{status:302,headers:{location}});
+    return new Response('<input id="pwdEncryptSalt" value="1234567890123456"><input name="execution" value="e1">');
+  });
+  assert.equal(token,'mock-oauth-token');assert.equal(index,8);
+});
 test('CAS 重定向携带本站 cookie 并提取 token',async()=>{
   let calls=0;
   const token=await loginCas('user','password',async(url,options)=>{

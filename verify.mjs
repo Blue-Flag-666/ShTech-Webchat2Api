@@ -2,6 +2,7 @@
 import { once } from 'node:events';
 import { configuration, createServer, events } from './server.mjs';
 const config = configuration();
+if (process.argv.includes('--cas')) config.token='';
 const stream = process.argv.includes('--stream');
 if (!config.key || !(config.token || (config.username && config.password)) || !config.group) {
   console.error('请先在 .env 填写 API_KEY、GENAI_CHAT_GROUP_ID，以及 GENAI_TOKEN 或 CAS 用户名和密码');

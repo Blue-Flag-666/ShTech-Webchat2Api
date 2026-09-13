@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
 env:
   IMAGE: ghcr.io/blue-flag-666/shtech-webchat2api
 jobs:
@@ -48,6 +51,12 @@ jobs:
           done
           docker logs proxy
           exit 1
+      - if: always()
+        name: Report image footprint
+        run: |
+          echo '### linux/${{ matrix.arch }} image' >> "$GITHUB_STEP_SUMMARY"
+          docker image inspect shtech-webchat2api:test --format 'Uncompressed image bytes: {{.Size}}' >> "$GITHUB_STEP_SUMMARY"
+          docker stats --no-stream --format 'Idle container memory: {{.MemUsage}}' proxy >> "$GITHUB_STEP_SUMMARY"
       - if: always()
         run: docker rm -f proxy || true
   publish:

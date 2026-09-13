@@ -14,7 +14,7 @@ export function upstreamFetch(url, options) {
 export function casFetch(url,options={}) {
   const target=new URL(url);
   const valid=target.origin===origin && (target.pathname.startsWith('/htk/user/') || target.pathname==='/htk/oauth/callback')
-    || target.origin==='https://ids.shanghaitech.edu.cn' && ['/authserver/login','/authserver/oauth2.0/authorize'].includes(target.pathname);
+    || target.origin==='https://ids.shanghaitech.edu.cn' && ['/authserver/login','/authserver/oauth2.0/authorize','/authserver/oauth2.0/callbackAuthorize'].includes(target.pathname);
   if(!valid || target.username || target.password) throw new Error('Unsupported CAS URL');
   return transportRequest(url,options,true);
 }

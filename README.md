@@ -39,7 +39,7 @@ console.log(await response.json());
 - 工具调用通过提示词声明和 `<tool_call>` JSON 解析实现，尚未真实模型验证。带工具声明的流式请求会先缓冲完整回答，解析成功后输出工具分块；错误格式、未知工具及 required 未遵循会报错。代理不会执行工具。
 - Responses 支持文本 input、instructions、function 工具及调用结果历史；Messages 支持文本、system、tool_use/tool_result 和 `x-api-key` 鉴权。两个协议均有流式与非流式实现，详见 [PROTOCOLS.md](PROTOCOLS.md)。
 - 图片、结构化输出及这两个协议的独立推理块仍待实现，不宣称完整兼容所有客户端。
-- CAS 自动登录和过期刷新已实现并通过 mock 测试，尚未验证真实 CAS 账号。可配置 `GENAI_USERNAME` / `GENAI_PASSWORD`，也支持 `_FILE` secret 文件；仅 JWT 模式仍需手动更新过期凭证。当前需要网页会话 ID；若上游需要 Cookie，可填写 `GENAI_COOKIE`。
+- CAS/OAuth 自动登录已通过真实账号登录验证（2026-09-13）。可配置 `GENAI_USERNAME` / `GENAI_PASSWORD`，也支持 `_FILE` secret 文件；仅 JWT 模式仍需手动更新过期凭证。当前需要网页会话 ID；若上游需要 Cookie，可填写 `GENAI_COOKIE`。
 - 同一服务一次只处理一个上游聊天请求，重叠请求返回 429，减少共用网页会话造成的冲突。不要在网页中同时操作同一会话。
 - 默认绑定回环地址，Docker 内监听 `0.0.0.0`，宿主机端口仍默认绑定回环。不会关闭 TLS 校验；运行环境需能够正常连接学校服务。
 - 总超时默认 120 秒；客户端断开会取消上游。请求限 1 MiB，累计文本响应限 8 MiB。
