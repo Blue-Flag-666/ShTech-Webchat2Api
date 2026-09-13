@@ -18,7 +18,7 @@ Responses 为无状态适配，不存储聊天记录。下一轮传入完整 inp
 
 普通文本在上游生成时逐块转发。工具声明通过提示词注入，上游完整回复解析成功后才产生工具事件；代理不会执行工具。Responses 支持 function、自由文本 custom、Codex namespace 展平和 allowed_tools 选择，并映射 `custom_tool_call` 的 input 增量/完成事件及历史结果。custom grammar 定义会加入提示词，但学校上游没有原生 CFG 约束。流中断返回 error 事件，不补发成功完成事件。上游明确返回 length 时，Responses 使用 incomplete，Messages 使用 max_tokens。
 
-上游提供 usage 时使用其计数；缺失时 Responses/Messages 采用 UTF-8 字节数除以 3 的粗略估算，不能作为计费或上下文预算依据。非流式响应通过 X-Usage-Source 标记 upstream 或 estimate；Messages 的 message_start 输入用量为估算，结束事件输出用量优先采用上游值。
+上游提供 usage 时使用其计数并补齐缺失的总数；缺失时三个协议采用 UTF-8 字节数除以 3 的粗略估算，不能作为计费或上下文预算依据。非流式响应通过 X-Usage-Source 标记 upstream 或 estimate；Messages 的 message_start 输入用量为估算，结束事件输出用量优先采用上游值。
 
 支持文本、function 工具和上游返回的推理摘要。Responses 将 `reasoning_content` 映射为 reasoning item 及 summary 流事件；Messages 映射为 thinking 内容块。历史中的 reasoning summary/thinking 块会作为带标记的 assistant 摘要送回上游。空 `signature` 只是协议兼容占位，不是 Anthropic 签名；请求中的推理强度不会传给学校上游。
 

@@ -83,6 +83,13 @@ function json(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(value));
 }
+function chatUsage(value,promptEstimate,completionEstimate) {
+  const count=(...keys)=>{for(const key of keys){const number=value?.[key];if(Number.isInteger(number)&&number>=0)return number;}};
+  const prompt_tokens=count('prompt_tokens','input_tokens') ?? promptEstimate;
+  const completion_tokens=count('completion_tokens','output_tokens') ?? completionEstimate;
+  const total_tokens=count('total_tokens') ?? prompt_tokens+completion_tokens;
+  return {...(value || {}),prompt_tokens,completion_tokens,total_tokens};
+}
 async function readBody(req) {
   let size = 0; const parts = [];
   for await (const chunk of req) { size += chunk.length; if (size > 1024 * 1024) throw error(413, '请求不能超过 1 MiB'); parts.push(chunk); }
@@ -229,7 +236,10 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       if(!parsed.tool_calls.length) parsed.content=parseStructured(parsed.content,formatPolicy);
       const finish = parsed.tool_calls.length ? 'tool_calls' : last.choices?.[0]?.finish_reason || 'stop';
       const finalReasoning=adapter && input.stream && !policy && !formatPolicy ? adapter.reasoning : reasoning;
-      const completion = { id: last.id || `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: last.created || Math.floor(Date.now()/1000), model: input.model || last.model || 'qwen-instruct', choices: [{ index: 0, message: { role: 'assistant', content: parsed.content, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls}:{}) }, finish_reason: finish }], ...(last.usage ? { usage: last.usage } : {}) };
+      const promptEstimate=Math.ceil(Buffer.byteLength(JSON.stringify(input.messages))/3);
+      const completionEstimate=Math.ceil(responseBytes/3);
+      const normalizedUsage=chatUsage(last.usage,promptEstimate,completionEstimate);
+      const completion = { id: last.id || `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: last.created || Math.floor(Date.now()/1000), model: input.model || last.model || 'qwen-instruct', choices: [{ index: 0, message: { role: 'assistant', content: parsed.content, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls}:{}) }, finish_reason: finish }], usage: normalizedUsage };
       if (adapter) {
         const result = await adapter.finish(completion,input.stream);
         if (input.stream) res.end();
@@ -244,13 +254,11 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         await write(res,`data: ${JSON.stringify({...streamBase,choices:[{index:0,delta:{},finish_reason:finish}]})}\n\n`);
       }
       if(input.stream&&!adapter&&input.stream_options?.include_usage) {
-        const prompt_tokens=Math.ceil(Buffer.byteLength(JSON.stringify(input.messages))/3);
-        const completion_tokens=Math.ceil(responseBytes/3);
-        const usage=last.usage || {prompt_tokens,completion_tokens,total_tokens:prompt_tokens+completion_tokens};
+        const usage=chatUsage(last.usage,promptEstimate,completionEstimate);
         await write(res,`data: ${JSON.stringify({...last,choices:[],usage})}\n\n`);
       }
       if (input.stream) { await write(res, 'data: [DONE]\n\n'); res.end(); }
-      else json(res, 200, completion);
+      else {res.setHeader('X-Usage-Source',last.usage ? 'upstream' : 'estimate');json(res, 200, completion);}
     } catch (e) {
       const status = e.status || (controller?.signal.aborted ? 504 : 502);
       const payload = { ...(path === '/v1/messages' ? {type:'error'} : {}), error: { message: e.status ? e.message : status === 504 ? '上游请求超时或已取消' : '无法连接上游服务', type: status === 400 ? 'invalid_request_error' : status === 401 ? 'authentication_error' : status === 404 ? 'not_found_error' : status === 429 ? 'rate_limit_error' : 'api_error', code: status } };

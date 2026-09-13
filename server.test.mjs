@@ -72,7 +72,7 @@ test('流式输出保留分块并产生单个 DONE',async () => {
 test('Chat 接受 max_completion_tokens 并按标准发送流式 usage 尾块',async()=>{
   await withServer(async(_,options)=>{
     assert.equal(JSON.parse(options.body).maxToken,32);
-    return new Response(sse([{...chunk('好'),usage:{prompt_tokens:2,completion_tokens:1,total_tokens:3}},chunk('','stop'),'[DONE]']),{headers:{'Content-Type':'text/event-stream'}});
+    return new Response(sse([{...chunk('好'),usage:{prompt_tokens:2,completion_tokens:1}},chunk('','stop'),'[DONE]']),{headers:{'Content-Type':'text/event-stream'}});
   },async call=>{
     const res=await call({...request,max_completion_tokens:32,stream:true,stream_options:{include_usage:true}});assert.equal(res.status,200);
     const frames=(await Array.fromAsync(events(res.body))).filter(item=>item.data!=='[DONE]').map(item=>JSON.parse(item.data));
