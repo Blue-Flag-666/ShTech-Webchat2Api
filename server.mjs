@@ -26,10 +26,14 @@ export function upstreamBody(input, config, supportedModels, formatPolicy=null) 
   if (!selected) throw error(400, `模型不可用：${input.model}`);
   const messages = normalizeMessages(input.messages, toolPolicy(input.tools,input.tool_choice));
   if (messages.at(-1).role !== 'user') throw error(400, '最后一条消息必须为 user 或工具结果');
-  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','chat_group_id','net_go','tools','tool_choice','response_format','parallel_tool_calls'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
+  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','max_completion_tokens','chat_group_id','net_go','tools','tool_choice','response_format','parallel_tool_calls','stream_options'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
   if (input.stream !== undefined && typeof input.stream !== 'boolean') throw error(400, 'stream 必须是布尔值');
   if (input.net_go !== undefined && typeof input.net_go !== 'boolean') throw error(400, 'net_go 必须是布尔值');
-  const max = input.max_tokens ?? 16384;
+  if(input.max_tokens!==undefined&&input.max_completion_tokens!==undefined&&input.max_tokens!==input.max_completion_tokens)throw error(400,'max_tokens 与 max_completion_tokens 不能冲突');
+  if(input.stream_options!==undefined) {
+    if(!input.stream || !input.stream_options || typeof input.stream_options!=='object' || Array.isArray(input.stream_options) || Object.keys(input.stream_options).some(key=>key!=='include_usage') || typeof input.stream_options.include_usage!=='boolean') throw error(400,'stream_options 仅支持流式 include_usage 布尔值');
+  }
+  const max = input.max_tokens ?? input.max_completion_tokens ?? 16384;
   if (!Number.isInteger(max) || max < 1 || max > 16384) throw error(400, 'max_tokens 必须是 1–16384 的整数');
   const group = input.chat_group_id ?? config.group;
   if (typeof group !== 'string' || !group.trim()) throw error(400, '请配置 GENAI_CHAT_GROUP_ID 或传入 chat_group_id');
@@ -84,8 +88,8 @@ async function readBody(req) {
   for await (const chunk of req) { size += chunk.length; if (size > 1024 * 1024) throw error(413, '请求不能超过 1 MiB'); parts.push(chunk); }
   try { return JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { throw error(400, '无效 JSON'); }
 }
-function authorized(req, key) {
-  const received = Buffer.from(req.headers.authorization || (req.url === '/v1/messages' && req.headers['x-api-key'] ? `Bearer ${req.headers['x-api-key']}` : '')), wanted = Buffer.from(`Bearer ${key}`);
+function authorized(req, key, path=req.url) {
+  const received = Buffer.from(req.headers.authorization || (path === '/v1/messages' && req.headers['x-api-key'] ? `Bearer ${req.headers['x-api-key']}` : '')), wanted = Buffer.from(`Bearer ${key}`);
   return received.length === wanted.length && timingSafeEqual(received, wanted);
 }
 async function write(res, text) {
@@ -153,19 +157,26 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     try { return await modelPending; } finally { modelPending = undefined; }
   }
   return http.createServer(async (req, res) => {
-    let controller, timer, acquired = false;
+    let controller, timer, acquired = false, path=req.url;
     try {
-      if (req.method === 'GET' && req.url === '/healthz') return json(res, 200, { status: 'ok' });
-      if (!config.key || !authorized(req, config.key)) throw error(401, '需要有效的本地 API Bearer 密钥');
-      if (req.method === 'GET' && req.url === '/health') return json(res, 200, { status: 'ok', upstream_configured: Boolean(tokenManager.configured && config.group) });
-      if (req.method === 'GET' && req.url === '/v1/models') return json(res, 200, { object: 'list', data: await models() });
-      if (req.method !== 'POST' || !['/v1/chat/completions','/v1/responses','/v1/messages'].includes(req.url)) throw error(404, '接口不存在');
+      path=new URL(req.url,'http://localhost').pathname;
+      if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
+      if (!config.key || !authorized(req, config.key, path)) throw error(401, '需要有效的本地 API Bearer 密钥');
+      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: Boolean(tokenManager.configured && config.group) });
+      if (req.method === 'GET' && path === '/v1/models') return json(res, 200, { object: 'list', data: await models() });
+      if (req.method === 'GET' && path.startsWith('/v1/models/')) {
+        let modelId;try{modelId=decodeURIComponent(path.slice('/v1/models/'.length));}catch{throw error(400,'模型 ID 编码无效');}
+        const model=(await models()).find(item=>item.id===modelId);
+        if(!model)throw error(404,`模型不存在：${modelId}`);
+        return json(res,200,model);
+      }
+      if (req.method !== 'POST' || !['/v1/chat/completions','/v1/responses','/v1/messages'].includes(path)) throw error(404, '接口不存在');
       if (!tokenManager.configured) throw error(503, '请配置 GENAI_TOKEN 或 CAS 账号');
       const rawInput = await readBody(req);
       if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) throw error(400, '请求必须是 JSON 对象');
-      const input = normalizeRequest(req.url,rawInput);
-      const formatPolicy=outputPolicy(req.url,rawInput);
-      const adapter = req.url === '/v1/chat/completions' ? null : new ProtocolOutput(req.url,input,async frame=>{
+      const input = normalizeRequest(path,rawInput);
+      const formatPolicy=outputPolicy(path,rawInput);
+      const adapter = path === '/v1/chat/completions' ? null : new ProtocolOutput(path,input,async frame=>{
         if (!res.headersSent) res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
         await write(res,frame);
       },rawInput);
@@ -208,7 +219,8 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
           if (adapter) { await adapter.reasoningDelta(thought); await adapter.delta(content); }
           else {
             if (!res.headersSent) res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
-            await write(res, `data: ${JSON.stringify(chunk)}\n\n`);
+            const outbound=input.stream_options?.include_usage?{...chunk,usage:null}:chunk;
+            await write(res, `data: ${JSON.stringify(outbound)}\n\n`);
           }
         }
       }
@@ -227,14 +239,21 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       if (input.stream && (policy || formatPolicy)) {
         res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
         const delta = { role:'assistant', ...(parsed.content ? {content:parsed.content}:{}), ...(reasoning?{reasoning_content:reasoning}:{}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls.map((t,index)=>({...t,index}))}:{}) };
-        await write(res,`data: ${JSON.stringify({...last,choices:[{index:0,delta,finish_reason:null}]})}\n\n`);
-        await write(res,`data: ${JSON.stringify({...last,choices:[{index:0,delta:{},finish_reason:finish}]})}\n\n`);
+        const streamBase=input.stream_options?.include_usage?{...last,usage:null}:last;
+        await write(res,`data: ${JSON.stringify({...streamBase,choices:[{index:0,delta,finish_reason:null}]})}\n\n`);
+        await write(res,`data: ${JSON.stringify({...streamBase,choices:[{index:0,delta:{},finish_reason:finish}]})}\n\n`);
+      }
+      if(input.stream&&!adapter&&input.stream_options?.include_usage) {
+        const prompt_tokens=Math.ceil(Buffer.byteLength(JSON.stringify(input.messages))/3);
+        const completion_tokens=Math.ceil(responseBytes/3);
+        const usage=last.usage || {prompt_tokens,completion_tokens,total_tokens:prompt_tokens+completion_tokens};
+        await write(res,`data: ${JSON.stringify({...last,choices:[],usage})}\n\n`);
       }
       if (input.stream) { await write(res, 'data: [DONE]\n\n'); res.end(); }
       else json(res, 200, completion);
     } catch (e) {
       const status = e.status || (controller?.signal.aborted ? 504 : 502);
-      const payload = { ...(req.url === '/v1/messages' ? {type:'error'} : {}), error: { message: e.status ? e.message : status === 504 ? '上游请求超时或已取消' : '无法连接上游服务', type: status === 400 ? 'invalid_request_error' : status === 401 ? 'authentication_error' : status === 429 ? 'rate_limit_error' : 'api_error', code: status } };
+      const payload = { ...(path === '/v1/messages' ? {type:'error'} : {}), error: { message: e.status ? e.message : status === 504 ? '上游请求超时或已取消' : '无法连接上游服务', type: status === 400 ? 'invalid_request_error' : status === 401 ? 'authentication_error' : status === 404 ? 'not_found_error' : status === 429 ? 'rate_limit_error' : 'api_error', code: status } };
       if (!res.destroyed) { if (res.headersSent) res.end(`event: error\ndata: ${JSON.stringify(payload)}\n\n`); else json(res, status, payload); }
     } finally { clearTimeout(timer); controller?.abort(); if (acquired) busy = false; }
   });

@@ -23,11 +23,12 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
   await fixture(async base=>{
     const client=new OpenAI({apiKey:'test',baseURL:`${base}/v1`,maxRetries:0});
     const models=await client.models.list();assert.equal(models.data[0].id,'qwen-instruct');
+    assert.equal((await client.models.retrieve('qwen-instruct')).id,'qwen-instruct');
     const chat=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}]});
     assert.equal(chat.choices[0].message.content,'你好');
-    const chatStream=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}],stream:true});
-    let chatText='';for await(const chunk of chatStream)chatText+=chunk.choices[0]?.delta?.content || '';
-    assert.equal(chatText,'你好');
+    const chatStream=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}],stream:true,stream_options:{include_usage:true}});
+    let chatText='',usage;for await(const chunk of chatStream){chatText+=chunk.choices[0]?.delta?.content || '';usage=chunk.usage || usage;}
+    assert.equal(chatText,'你好');assert.equal(usage.total_tokens,3);
     const response=await client.responses.create({model:'qwen-instruct',input:'你好',store:false});
     assert.equal(response.output[0].content[0].text,'你好');
     const responseStream=await client.responses.create({model:'qwen-instruct',input:'你好',store:false,stream:true});

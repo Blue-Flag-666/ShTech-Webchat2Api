@@ -12,6 +12,8 @@ Responses 示例请求：`{"model":"qwen-instruct","input":"你好","store":fals
 
 Messages 示例请求：`{"model":"qwen-instruct","messages":[{"role":"user","content":"你好"}],"max_tokens":512,"stream":true}`。
 
+Chat 同时接受 `max_tokens` 与新版 `max_completion_tokens`（不能给出冲突值）。`stream_options.include_usage:true` 会在 `[DONE]` 前发送 `choices:[]` 的 usage 尾块；优先使用上游计数，缺失时使用明确属于估算的本地计数。`GET /v1/models/{id}` 支持官方 SDK 的单模型查询。
+
 Responses 为无状态适配，不存储聊天记录。下一轮传入完整 input 历史，包括前一轮 output 的 function_call 和对应 function_call_output。`store:true`、`previous_response_id` 会返回 400。
 
 普通文本在上游生成时逐块转发。工具声明通过提示词注入，上游完整回复解析成功后才产生工具事件；代理不会执行工具。Responses 支持 function、自由文本 custom、Codex namespace 展平和 allowed_tools 选择，并映射 `custom_tool_call` 的 input 增量/完成事件及历史结果。custom grammar 定义会加入提示词，但学校上游没有原生 CFG 约束。流中断返回 error 事件，不补发成功完成事件。上游明确返回 length 时，Responses 使用 incomplete，Messages 使用 max_tokens。

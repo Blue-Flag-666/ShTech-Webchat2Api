@@ -69,6 +69,17 @@ test('流式输出保留分块并产生单个 DONE',async () => {
     const text=await res.text(); assert.equal(text.split('[DONE]').length,2); assert.match(text,/chat.completion.chunk/);
   });
 });
+test('Chat 接受 max_completion_tokens 并按标准发送流式 usage 尾块',async()=>{
+  await withServer(async(_,options)=>{
+    assert.equal(JSON.parse(options.body).maxToken,32);
+    return new Response(sse([{...chunk('好'),usage:{prompt_tokens:2,completion_tokens:1,total_tokens:3}},chunk('','stop'),'[DONE]']),{headers:{'Content-Type':'text/event-stream'}});
+  },async call=>{
+    const res=await call({...request,max_completion_tokens:32,stream:true,stream_options:{include_usage:true}});assert.equal(res.status,200);
+    const frames=(await Array.fromAsync(events(res.body))).filter(item=>item.data!=='[DONE]').map(item=>JSON.parse(item.data));
+    assert.ok(frames.slice(0,-1).every(frame=>frame.usage===null));assert.deepEqual(frames.at(-1).choices,[]);assert.equal(frames.at(-1).usage.total_tokens,3);
+    assert.equal((await call({...request,max_tokens:1,max_completion_tokens:2})).status,400);
+  });
+});
 test('截断流不伪装成功',async()=>{
   for(const stream of [false,true]) await withServer(async()=>new Response(sse([chunk('部分内容')]),{headers:{'Content-Type':'text/event-stream'}}),async call=>{
     const res=await call({...request,stream}); const text=await res.text();
@@ -117,6 +128,8 @@ test('模型目录可扩展并缓存，未知模型被拒绝', async()=>{
   await withServer(async()=>new Response(sse([chunk('好','stop'),'[DONE]']),{headers:{'Content-Type':'text/event-stream'}}),async(call,base)=>{
     const models=await fetch(base+'/v1/models',{headers:{Authorization:'Bearer '+config.key}}); assert.equal(models.status,200);
     const first=await models.json(); assert.deepEqual(first.data.map(x=>x.id),['qwen-instruct']);
+    const model=await fetch(base+'/v1/models/qwen-instruct',{headers:{Authorization:'Bearer '+config.key}});assert.equal((await model.json()).id,'qwen-instruct');
+    assert.equal((await fetch(base+'/v1/models/missing',{headers:{Authorization:'Bearer '+config.key}})).status,404);
     assert.equal((await call({...request,model:'not-real'})).status,400);
   });
 });
