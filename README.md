@@ -68,4 +68,4 @@ docker compose logs -f
 
 ## 依赖更新策略
 
-项目新增依赖时采用当时的最新稳定版本，并避免加入运行时依赖，除非标准库无法可靠实现。`.github/dependabot.yml` 每周检查 npm、Docker 基础镜像和 GitHub Actions；升级由 GitHub Actions 在 Windows、Linux、amd64 和 arm64 环境验证后合并。
+项目新增依赖时采用当时的最新稳定版本，并避免加入运行时依赖，除非标准库无法可靠实现。OpenAI 与 Anthropic 官方 SDK 仅作为 CI 开发依赖，用于验证真实客户端调用，不进入最终镜像。`.github/dependabot.yml` 每周检查 npm、Docker 基础镜像和 GitHub Actions；升级由 GitHub Actions 在 Windows、Linux、amd64 和 arm64 环境验证后合并。

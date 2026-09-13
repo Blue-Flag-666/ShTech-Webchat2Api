@@ -16,4 +16,6 @@ Chat 普通流式只转发分块，不累计回答。Responses 的 done、item.d
 
 2026-09-13 匿名读取 GHCR manifest，提交 f22b8f6 的镜像压缩层总大小：amd64 为 57,753,969 字节（约 55.1 MiB），arm64 为 58,127,482 字节（约 55.4 MiB）。这是层下载体积，不是解压磁盘占用。Linux/arm64 镜像已在 GitHub Actions 通过启动测试，树莓派实机表现仍未测量。
 
+提交 6fefbdb 的精简镜像由 GitHub Actions 34761939147 测得：amd64 解压大小 160,590,028 字节，空闲容器约 19.09 MiB；arm64 解压大小 158,033,046 字节。arm64 容器在 x86 runner 上经 QEMU 运行时显示约 111.8 MiB，该数字包含模拟开销，不能代表树莓派实机内存。两个架构均在测量前通过完整测试和 HTTP 健康检查。
+
 可在目标设备检出源码后运行 `node profile.mjs` 复测；实际部署还需测量 `docker stats --no-stream` 和镜像清单中各架构层大小。目前不能据此承诺固定最低内存。
