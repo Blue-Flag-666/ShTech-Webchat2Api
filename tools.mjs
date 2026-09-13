@@ -20,7 +20,8 @@ export function toolPolicy(tools, choice = 'auto') {
   } else if (!['auto','none','required'].includes(choice)) throw invalid('无效 tool_choice');
   if (required && !names.size) throw invalid('required 至少需要一个工具');
   if (choice === 'none' || !names.size) return null;
-  return { tools: tools.filter(t=>allowed.has(t.function.name)), allowed, required };
+  return { tools: tools.filter(t=>allowed.has(t.function.name)), allowed, required,
+    custom:new Set(tools.filter(t=>t.custom&&allowed.has(t.function.name)).map(t=>t.function.name)) };
 }
 export function toolPrompt(policy) {
   if (!policy) return '';
@@ -33,6 +34,7 @@ export function parseToolCalls(text, policy, makeId) {
     let parsed;
     try { parsed=JSON.parse(raw); } catch { throw upstreamError('模型输出了无法解析的工具调用'); }
     if (!policy.allowed.has(parsed.name) || !parsed.arguments || typeof parsed.arguments !== 'object' || Array.isArray(parsed.arguments)) throw upstreamError('模型输出了不允许的工具或无效参数');
+    if (policy.custom?.has(parsed.name) && typeof parsed.arguments.input !== 'string') throw upstreamError('模型输出了无效的 custom 工具文本参数');
     calls.push({id:makeId(),type:'function',function:{name:parsed.name,arguments:JSON.stringify(parsed.arguments)}});
     if (calls.length > 64) throw upstreamError('模型工具调用数量超过限制');
     return '';

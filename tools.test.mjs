@@ -18,3 +18,8 @@ test('工具结果必须对应历史调用；全部工具结果进入文本历�
   assert.throws(()=>normalizeMessages(messages.slice(0,-1),null),/缺少/);
   assert.throws(()=>normalizeMessages([{role:'tool',tool_call_id:'bad',content:'结果'}],null),/匹配/);
 });
+test('custom 工具只接受 input 自由文本参数',()=>{
+  const custom=toolPolicy([{type:'function',custom:true,function:{name:'patch',parameters:{type:'object'}}}],'required');
+  assert.equal(parseToolCalls('<api_tool_call>{"name":"patch","arguments":{"input":"diff"}}</api_tool_call>',custom,()=> 'call_x').tool_calls.length,1);
+  assert.throws(()=>parseToolCalls('<api_tool_call>{"name":"patch","arguments":{}}</api_tool_call>',custom,()=> 'call_x'),/custom/);
+});

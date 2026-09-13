@@ -14,14 +14,14 @@
 
 ## 当前项目的实际位置
 
-当前项目是一个 Node.js 22、零第三方依赖的本地小型代理，已经真实验证：
+当前项目是一个 Node.js 26、零第三方依赖的本地小型代理，已经真实验证：
 
 - `POST /v1/chat/completions` 的流式和非流式调用。
 - 上游 `POST /htk/chat/start/chat` 的 SSE 解析，包括中文跨 UTF-8 分块、CR/LF/CRLF、多行 data 和 `[DONE]`。
 - 本地 Bearer API key、请求大小限制、单请求并发限制、客户端断开取消、超时和错误事件。
 - 学校上游不规范 CSP 响应头的兼容处理；固定上游、TLS 校验保持开启、不跟随重定向。
 
-2026-09-13 已进一步真实验证 CAS/OAuth 自动登录、国内自部署模型目录，以及三个协议的文本 JSON/SSE 和 function 工具往返。Chat 可保留 reasoning_content。Windows/Linux CI 与 amd64/arm64 镜像测试通过，GHCR 已发布且可匿名读取 manifest。仍缺少图片、Responses/Messages 独立推理块、custom tools 和广泛客户端实测；不能宣称比参考项目完整。
+2026-09-13 已进一步真实验证 CAS/OAuth 自动登录、国内自部署模型目录，以及三个协议的文本 JSON/SSE 和 function 工具往返。Chat 可保留 reasoning_content；Responses/Messages 已映射独立推理块，Responses 支持 custom/namespace/allowed_tools。Windows/Linux CI 与 amd64/arm64 镜像测试通过，GHCR 已发布且可匿名读取 manifest。图片因国内 xinference 上游缺少可复核入口而明确拒绝，广泛客户端仍待实测；不能宣称比参考项目完整。
 
 ## 值得吸收的设计
 

@@ -13,11 +13,50 @@ function text(value, types = ['text','input_text','output_text']) {
 function keys(input, allowed) {
   for (const key of Object.keys(input)) if (!allowed.includes(key)) throw bad(`暂不支持参数 ${key}`);
 }
+function responseTools(tools) {
+  if (tools === undefined) return undefined;
+  if (!Array.isArray(tools)) throw bad('tools 必须为数组');
+  const result=[];
+  const add=(tool,depth=0)=>{
+    if(depth>4)throw bad('namespace 工具嵌套过深');
+    if (!tool || typeof tool!=='object' || Array.isArray(tool)) throw bad('无效 Responses 工具声明');
+    if (tool.type==='namespace') {
+      if (!Array.isArray(tool.tools)) throw bad('namespace.tools 必须为数组');
+      for (const child of tool.tools) add(child,depth+1);
+      return;
+    }
+    if (!['function','custom'].includes(tool.type)) throw bad('当前仅支持 function、custom 和 namespace 工具');
+    if (tool.type==='function') {
+      result.push({type:'function',function:{name:tool.name,description:tool.description,parameters:tool.parameters}});
+      return;
+    }
+    if (tool.format!==undefined && (!tool.format || typeof tool.format!=='object' || Array.isArray(tool.format))) throw bad('custom tool format 必须是对象');
+    const definition=tool.format?.definition;
+    if (definition!==undefined && typeof definition!=='string') throw bad('custom tool format.definition 必须是字符串');
+    const description=[tool.description,definition&&`自由文本格式定义：\n${definition}`].filter(Boolean).join('\n\n');
+    result.push({type:'function',custom:true,function:{name:tool.name,description,parameters:{type:'object',properties:{input:{type:'string',description:'该工具的完整自由文本输入'}},required:['input'],additionalProperties:false}}});
+  };
+  for (const tool of tools) add(tool);
+  return result;
+}
+function responseToolChoice(choice, tools) {
+  if (choice===undefined || typeof choice==='string') return {choice,tools};
+  if (!choice || typeof choice!=='object' || Array.isArray(choice)) throw bad('无效 tool_choice');
+  if (['function','custom'].includes(choice.type)) return {choice:{type:'function',function:{name:choice.name}},tools};
+  if (choice.type!=='allowed_tools' || !['auto','required'].includes(choice.mode) || !Array.isArray(choice.tools) || !choice.tools.length) throw bad('无效 tool_choice');
+  const allowed=new Set(choice.tools.map(tool=>{
+    if (!tool || !['function','custom'].includes(tool.type) || typeof tool.name!=='string') throw bad('allowed_tools 包含无效工具');
+    return tool.name;
+  }));
+  const available=new Set((tools || []).map(tool=>tool.function?.name));
+  if ([...allowed].some(name=>!available.has(name))) throw bad('allowed_tools 指定了未知工具');
+  return {choice:choice.mode,tools:(tools || []).filter(tool=>allowed.has(tool.function.name))};
+}
 export function normalizeRequest(path, input) {
   if (path === '/v1/chat/completions') return input;
   const out = { model: input.model, stream: input.stream, messages: [] };
   if (path === '/v1/responses') {
-    keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning','text']);
+    keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning','text','parallel_tool_calls','include']);
     if (input.store === true || input.previous_response_id != null) throw bad('当前 Responses 为无状态接口，请使用 store:false 并传入完整历史');
     if (input.store !== undefined && typeof input.store !== 'boolean') throw bad('store 必须为布尔值');
     if (input.instructions != null) out.messages.push({role:'system',content:text(input.instructions)});
@@ -33,19 +72,21 @@ export function normalizeRequest(path, input) {
         const previous = out.messages.at(-1);
         if (previous?.role === 'assistant' && previous.tool_calls) previous.tool_calls.push(call);
         else out.messages.push({role:'assistant',content:null,tool_calls:[call]});
-      } else if (item?.type === 'function_call_output') out.messages.push({role:'tool',tool_call_id:item.call_id,content:text(item.output)});
+      } else if (item?.type === 'custom_tool_call') {
+        if (typeof item.input!=='string') throw bad('custom_tool_call.input 必须是字符串');
+        const call={id:item.call_id,type:'function',function:{name:item.name,arguments:JSON.stringify({input:item.input})}};
+        const previous=out.messages.at(-1);
+        if (previous?.role==='assistant'&&previous.tool_calls) previous.tool_calls.push(call);
+        else out.messages.push({role:'assistant',content:null,tool_calls:[call]});
+      } else if (item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output') out.messages.push({role:'tool',tool_call_id:item.call_id,content:text(item.output)});
       else if (item && (!item.type || item.type === 'message')) out.messages.push({role:item.role,content:text(item.content)});
       else throw bad('不支持的 Responses 输入项');
     }
-    if (input.tools !== undefined) {
-      if (!Array.isArray(input.tools)) throw bad('tools 必须为数组');
-      out.tools = input.tools.map(t => {
-        if (t?.type !== 'function') throw bad('当前仅支持 function 工具');
-        return {type:'function',function:{name:t.name,description:t.description,parameters:t.parameters}};
-      });
-    }
-    out.tool_choice = typeof input.tool_choice === 'object' && input.tool_choice !== null
-      ? {type:input.tool_choice.type,function:{name:input.tool_choice.name}} : input.tool_choice;
+    const selected=responseToolChoice(input.tool_choice,responseTools(input.tools));
+    out.tools=selected.tools;out.tool_choice=selected.choice;
+    if (input.parallel_tool_calls!==undefined && typeof input.parallel_tool_calls!=='boolean') throw bad('parallel_tool_calls 必须为布尔值');
+    if (input.include!==undefined && (!Array.isArray(input.include) || input.include.some(value=>value!=='reasoning.encrypted_content'))) throw bad('当前 include 仅接受 reasoning.encrypted_content');
+    out.parallel_tool_calls=input.parallel_tool_calls;
     out.max_tokens = input.max_output_tokens;
   } else {
     keys(input, ['model','messages','system','stream','max_tokens','tools','tool_choice','metadata','thinking','output_config']);
@@ -99,7 +140,9 @@ export class ProtocolOutput {
     this.id=id(path === '/v1/responses' ? 'resp' : 'msg');
     this.messageId=id('msg'); this.reasoningId=id('rs'); this.created=Math.floor(Date.now()/1000);
     this.text=''; this.reasoning=''; this.started=false; this.textIndex=null; this.reasoningIndex=null; this.nextIndex=0;
-    this.metadata=original.metadata || {};
+    this.metadata=original.metadata || {};this.original=original;this.customTools=new Set();
+    const collect=tools=>{for(const tool of tools || [])if(tool?.type==='namespace')collect(tool.tools);else if(tool?.type==='custom'&&typeof tool.name==='string')this.customTools.add(tool.name);};
+    collect(original.tools);
   }
   async event(type, data={}) {
     const value={type,...data,...(this.path === '/v1/responses' ? {sequence_number:this.sequence++} : {})};
@@ -108,9 +151,8 @@ export class ProtocolOutput {
   response(output=[],status='in_progress',usage=null) {
     return {id:this.id,object:'response',created_at:this.created,status,error:null,
       incomplete_details:status === 'incomplete' ? {reason:'max_output_tokens'} : null,
-      model:this.input.model || 'qwen-instruct',output,usage,store:false,parallel_tool_calls:true,
-      tool_choice:typeof this.input.tool_choice === 'object' ? {type:'function',name:this.input.tool_choice.function.name} : this.input.tool_choice || 'auto',
-      tools:(this.input.tools || []).map(t=>({type:'function',...t.function})),metadata:this.metadata,
+      model:this.input.model || 'qwen-instruct',output,usage,store:false,parallel_tool_calls:this.original.parallel_tool_calls ?? true,
+      tool_choice:this.original.tool_choice ?? 'auto',tools:this.original.tools || [],metadata:this.metadata,
       reasoning:{effort:null,summary:this.reasoning? 'auto':null}};
   }
   message(content=[],stop_reason=null,usage={input_tokens:0,output_tokens:0}) {
@@ -118,7 +160,7 @@ export class ProtocolOutput {
   }
   part(value) { return {type:'output_text',text:value,annotations:[],logprobs:[]}; }
   item(value,status='completed') { return {id:this.messageId,type:'message',status,role:'assistant',content:[this.part(value)]}; }
-  reasoningItem(status='completed') { return {id:this.reasoningId,type:'reasoning',status,summary:[{type:'summary_text',text:this.reasoning}]}; }
+  reasoningItem(status='completed') { return {id:this.reasoningId,type:'reasoning',status,summary:[{type:'summary_text',text:this.reasoning}],content:[],encrypted_content:null}; }
   async start() {
     if (this.started) return;
     this.started=true;
@@ -165,7 +207,9 @@ export class ProtocolOutput {
     const reasoningItem=response ? this.reasoningItem(limited?'incomplete':'completed') : {type:'thinking',thinking:this.reasoning,signature:''};
     const messageItem=response ? this.item(message.content,limited?'incomplete':'completed') : {type:'text',text:message.content};
     const callItems=calls.map(call=>response
-      ? {id:id('fc'),type:'function_call',status:'completed',call_id:call.id,name:call.function.name,arguments:call.function.arguments}
+      ? this.customTools.has(call.function.name)
+        ? {id:id('ctc'),type:'custom_tool_call',status:'completed',call_id:call.id,name:call.function.name,input:(()=>{const value=JSON.parse(call.function.arguments).input;return typeof value==='string'?value:JSON.stringify(value);})()}
+        : {id:id('fc'),type:'function_call',status:'completed',call_id:call.id,name:call.function.name,arguments:call.function.arguments}
       : {type:'tool_use',id:call.id,name:call.function.name,input:JSON.parse(call.function.arguments)});
     let output=[];
     if(!stream) output=[...(this.reasoning?[reasoningItem]:[]),...(message.content?[messageItem]:[]),...callItems];
@@ -197,9 +241,10 @@ export class ProtocolOutput {
     for (const item of callItems) {
       const index=this.nextIndex++;indexed.push([index,item]);
       if (response) {
-        await this.event('response.output_item.added',{output_index:index,item:{...item,status:'in_progress',arguments:''}});
-        await this.event('response.function_call_arguments.delta',{item_id:item.id,output_index:index,delta:item.arguments});
-        await this.event('response.function_call_arguments.done',{item_id:item.id,output_index:index,arguments:item.arguments});
+        const custom=item.type==='custom_tool_call',field=custom?'input':'arguments';
+        await this.event('response.output_item.added',{output_index:index,item:{...item,status:'in_progress',[field]:''}});
+        await this.event(custom?'response.custom_tool_call_input.delta':'response.function_call_arguments.delta',{item_id:item.id,output_index:index,delta:item[field]});
+        await this.event(custom?'response.custom_tool_call_input.done':'response.function_call_arguments.done',{item_id:item.id,output_index:index,[field]:item[field]});
         await this.event('response.output_item.done',{output_index:index,item});
       } else {
         await this.event('content_block_start',{index,content_block:{...item,input:{}}});

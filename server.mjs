@@ -26,7 +26,7 @@ export function upstreamBody(input, config, supportedModels, formatPolicy=null) 
   if (!selected) throw error(400, `模型不可用：${input.model}`);
   const messages = normalizeMessages(input.messages, toolPolicy(input.tools,input.tool_choice));
   if (messages.at(-1).role !== 'user') throw error(400, '最后一条消息必须为 user 或工具结果');
-  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','chat_group_id','net_go','tools','tool_choice','response_format'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
+  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','chat_group_id','net_go','tools','tool_choice','response_format','parallel_tool_calls'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
   if (input.stream !== undefined && typeof input.stream !== 'boolean') throw error(400, 'stream 必须是布尔值');
   if (input.net_go !== undefined && typeof input.net_go !== 'boolean') throw error(400, 'net_go 必须是布尔值');
   const max = input.max_tokens ?? 16384;

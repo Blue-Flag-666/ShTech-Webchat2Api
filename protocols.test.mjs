@@ -66,6 +66,31 @@ test('协议工具调用可回传历史并对应 call ID',async()=>{
     }else assert.equal((await anthropic.json()).content[0].type,'tool_use');
   },'<tool_call>{"name":"weather","arguments":{"city":"上海"}}</tool_call>');
 });
+test('Responses custom 与 namespace 工具支持自由文本、流事件和历史结果',async()=>{
+  for(const stream of [false,true]) await fixture(async call=>{
+    const body={input:'修改文件',stream,parallel_tool_calls:false,tools:[{type:'namespace',name:'workspace',tools:[
+      {type:'function',name:'read_file',parameters:{type:'object'}},
+      {type:'custom',name:'apply_patch',description:'应用补丁',format:{type:'grammar',syntax:'lark',definition:'start: patch'}}
+    ]}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'custom',name:'apply_patch'}]}};
+    const res=await call('/v1/responses',body);assert.equal(res.status,200);
+    const frames=stream?(await Array.fromAsync(events(res.body))).map(x=>JSON.parse(x.data)):null;
+    const result=stream?frames.at(-1).response:await res.json();
+    assert.equal(result.parallel_tool_calls,false);assert.deepEqual(result.tools,body.tools);assert.deepEqual(result.tool_choice,body.tool_choice);
+    const item=result.output[0];assert.equal(item.type,'custom_tool_call');assert.equal(item.name,'apply_patch');assert.equal(item.input,'*** Begin Patch\n*** End Patch');
+    if(stream) {
+      assert.equal(frames.find(x=>x.type==='response.custom_tool_call_input.delta').delta,item.input);
+      assert.equal(frames.find(x=>x.type==='response.custom_tool_call_input.done').input,item.input);
+    }
+    const normalized=normalizeRequest('/v1/responses',{input:[{role:'user',content:'修改'},item,{type:'custom_tool_call_output',call_id:item.call_id,output:'Done'}]});
+    assert.deepEqual(JSON.parse(normalized.messages.at(-2).tool_calls[0].function.arguments),{input:item.input});
+    assert.equal(normalized.messages.at(-1).tool_call_id,item.call_id);
+  },'<api_tool_call>{"name":"apply_patch","arguments":{"input":"*** Begin Patch\\n*** End Patch"}}</api_tool_call>');
+});
+test('Responses allowed_tools 只向上游暴露允许的工具',()=>{
+  const normalized=normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'a',parameters:{}},{type:'custom',name:'patch'}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'custom',name:'patch'}]}});
+  assert.equal(normalized.tool_choice,'required');assert.equal(normalized.tools.length,1);assert.equal(normalized.tools[0].function.name,'patch');assert.equal(normalized.tools[0].custom,true);
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'a'}],tool_choice:{type:'allowed_tools',mode:'auto',tools:[{type:'function',name:'missing'}]}}),/未知/);
+});
 test('截断流不会产生协议成功结束事件，长度截断标记 incomplete',async()=>{
   await fixture(async call=>{
     for(const [path,body] of requests){
