@@ -54,9 +54,13 @@ jobs:
       - if: always()
         name: Report image footprint
         run: |
+          IMAGE_BYTES=$(docker image inspect shtech-webchat2api:test --format '{{.Size}}')
+          IDLE_MEMORY=$(docker stats --no-stream --format '{{.MemUsage}}' proxy)
+          echo "linux/${{ matrix.arch }} uncompressed image bytes: $IMAGE_BYTES"
+          echo "linux/${{ matrix.arch }} idle container memory: $IDLE_MEMORY"
           echo '### linux/${{ matrix.arch }} image' >> "$GITHUB_STEP_SUMMARY"
-          docker image inspect shtech-webchat2api:test --format 'Uncompressed image bytes: {{.Size}}' >> "$GITHUB_STEP_SUMMARY"
-          docker stats --no-stream --format 'Idle container memory: {{.MemUsage}}' proxy >> "$GITHUB_STEP_SUMMARY"
+          echo "Uncompressed image bytes: $IMAGE_BYTES" >> "$GITHUB_STEP_SUMMARY"
+          echo "Idle container memory: $IDLE_MEMORY" >> "$GITHUB_STEP_SUMMARY"
       - if: always()
         run: docker rm -f proxy || true
   publish:

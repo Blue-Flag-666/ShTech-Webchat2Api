@@ -12,7 +12,7 @@
 
 Chat 普通流式只转发分块，不累计回答。Responses 的 done、item.done 和 completed 事件包含完整输出，导致同一正文多次经过网络，峰值也较高。模型目录限制 2 MiB、SSE 单事件限制 1 MiB、累计输出限制 8 MiB，超限取消上游。
 
-镜像无第三方 npm 运行依赖，不包含测试、基准脚本或文档。构建上下文使用允许列表，只发送 Dockerfile、运行源码、package.json 和无秘密的 .env.example。当前基础镜像为 `node:26.8.2-alpine`；下方旧提交的体积记录仅用于历史对比。
+镜像无第三方 npm 运行依赖，不包含测试、基准脚本或文档。构建上下文使用允许列表，只发送 Dockerfile、运行源码、package.json 和无秘密的 .env.example。构建阶段使用官方 `node:26.8.2-alpine`，最终阶段基于 `alpine:3.24.1`，仅保留 Node 可执行文件、许可证、CA 证书和必要 C++ 运行库，不包含 npm、Corepack及开发头文件；下方旧提交的体积记录仅用于历史对比。
 
 2026-09-13 匿名读取 GHCR manifest，提交 f22b8f6 的镜像压缩层总大小：amd64 为 57,753,969 字节（约 55.1 MiB），arm64 为 58,127,482 字节（约 55.4 MiB）。这是层下载体积，不是解压磁盘占用。Linux/arm64 镜像已在 GitHub Actions 通过启动测试，树莓派实机表现仍未测量。
 

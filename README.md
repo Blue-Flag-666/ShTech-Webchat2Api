@@ -48,7 +48,7 @@ console.log(await response.json());
 
 ## Docker（amd64 / arm64）
 
-镜像使用 `node:26.8.2-alpine` 的无依赖运行时，GitHub Actions 会构建并发布 `linux/amd64` 和 `linux/arm64` manifest。将 `.env.example` 复制为 `.env` 并填写凭证后：
+镜像从官方 `node:26.8.2-alpine` 复制 Node 可执行文件到 `alpine:3.24.1`，最终层不包含 npm、Corepack、开发头文件或测试。GitHub Actions 会构建并发布 `linux/amd64` 和 `linux/arm64` manifest。将 `.env.example` 复制为 `.env` 并填写凭证后：
 
 ```bash
 docker compose pull
