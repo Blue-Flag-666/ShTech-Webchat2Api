@@ -37,8 +37,8 @@ console.log(await response.json());
 - 上游始终请求流式输出；非流式由本地汇总。最后一条 user 消息映射为 `chatInfo`，其余历史映射为 `messages`。
 - 可用参数：`model`、`messages`、`stream`、`max_tokens`（1–16384）、`chat_group_id`、`net_go`、`tools`、`tool_choice`。支持文本 user/assistant/system/developer 和配对的工具结果。
 - 工具调用通过当前请求中的提示词声明和 `<api_tool_call>` JSON 解析实现；旧 `<tool_call>` 输出也可解析。Qwen 已真实验证三个协议的工具调用及结果回传。带工具声明的流式请求先缓冲完整回答，解析成功后输出工具分块；错误格式、未知工具及 required 未遵循会报错。代理不会执行工具。
-- Responses 支持文本 input、instructions、function 工具及调用结果历史；Messages 支持文本、system、tool_use/tool_result 和 `x-api-key` 鉴权。两个协议均有流式与非流式实现，详见 [PROTOCOLS.md](PROTOCOLS.md)。
-- 图片、结构化输出及这两个协议的独立推理块仍待实现，不宣称完整兼容所有客户端。
+- Responses 支持文本 input、instructions、function 工具、推理摘要及调用结果历史；Messages 支持文本、system、thinking、tool_use/tool_result 和 `x-api-key` 鉴权。两个协议均有流式与非流式实现，详见 [PROTOCOLS.md](PROTOCOLS.md)。
+- 图片和结构化输出仍待实现，不宣称完整兼容所有客户端。
 - CAS/OAuth 自动登录已通过真实账号登录验证（2026-09-13）。可配置 `GENAI_USERNAME` / `GENAI_PASSWORD`，也支持 `_FILE` secret 文件；仅 JWT 模式仍需手动更新过期凭证。当前需要网页会话 ID；若上游需要 Cookie，可填写 `GENAI_COOKIE`。
 - 同一服务一次只处理一个上游聊天请求，重叠请求返回 429，减少共用网页会话造成的冲突。不要在网页中同时操作同一会话。
 - 默认绑定回环地址，Docker 内监听 `0.0.0.0`，宿主机端口仍默认绑定回环。不会关闭 TLS 校验；运行环境需能够正常连接学校服务。

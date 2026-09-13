@@ -18,7 +18,9 @@ Responses 为无状态适配，不存储聊天记录。下一轮传入完整 inp
 
 上游提供 usage 时使用其计数；缺失时 Responses/Messages 采用 UTF-8 字节数除以 3 的粗略估算，不能作为计费或上下文预算依据。非流式响应通过 X-Usage-Source 标记 upstream 或 estimate；Messages 的 message_start 输入用量为估算，结束事件输出用量优先采用上游值。
 
-目前仅支持文本和 function 工具。图片、音频、内置搜索工具、JSON Schema 强制输出、独立推理内容块以及有状态 Responses 尚未支持。未实现的请求参数返回 400；不伪装为已执行。max_tokens 传给学校接口，尚未证明上游严格执行该限制。
+支持文本、function 工具和上游返回的推理摘要。Responses 将 `reasoning_content` 映射为 reasoning item 及 summary 流事件；Messages 映射为 thinking 内容块。历史中的 reasoning summary/thinking 块会作为带标记的 assistant 摘要送回上游。空 `signature` 只是协议兼容占位，不是 Anthropic 签名；请求中的推理强度不会传给学校上游。
+
+图片、音频、内置搜索工具、JSON Schema 强制输出以及有状态 Responses 尚未支持。未实现的请求参数返回 400；不伪装为已执行。max_tokens 传给学校接口，尚未证明上游严格执行该限制。
 
 2026-09-13 已通过学校 Qwen 验证三个协议的文本 JSON/SSE 和 echo 工具往返。可运行 `node --env-file=.env live-verify.mjs --cas` 复测；脚本会登录学校并发送 12 个测试请求，使用账号额度。该结果不代表任意工具、模型或客户端均已验证。工具提示使用普通 `<api_tool_call>` 文本标签；真实测试中 Qwen 对原 `<tool_call>` 提示返回空正文，故不再以该标签引导生成。
 

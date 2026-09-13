@@ -199,11 +199,11 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         responseBytes += Buffer.byteLength(content) + Buffer.byteLength(thought);
         if (responseBytes > 8 * 1024 * 1024) throw error(502, '上游响应超过 8 MiB');
         if (!input.stream || policy) text += content;
-        if (!adapter && (!input.stream || policy)) reasoning += thought;
+        if (!input.stream || policy) reasoning += thought;
         if (choice?.finish_reason != null) finished = true;
         last = { ...last, ...chunk, choices: choice ? chunk.choices : last?.choices };
         if (input.stream && !policy) {
-          if (adapter) await adapter.delta(content);
+          if (adapter) { await adapter.reasoningDelta(thought); await adapter.delta(content); }
           else {
             if (!res.headersSent) res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
             await write(res, `data: ${JSON.stringify(chunk)}\n\n`);
@@ -213,7 +213,8 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       if (!seen || !finished) throw error(502, '上游流意外结束，未收到完成标记');
       const parsed = parseToolCalls(adapter && input.stream && !policy ? adapter.text : text,policy,()=>`call_${randomUUID().replaceAll('-','')}`);
       const finish = parsed.tool_calls.length ? 'tool_calls' : last.choices?.[0]?.finish_reason || 'stop';
-      const completion = { id: last.id || `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: last.created || Math.floor(Date.now()/1000), model: input.model || last.model || 'qwen-instruct', choices: [{ index: 0, message: { role: 'assistant', content: parsed.content, ...(reasoning ? { reasoning_content: reasoning } : {}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls}:{}) }, finish_reason: finish }], ...(last.usage ? { usage: last.usage } : {}) };
+      const finalReasoning=adapter && input.stream && !policy ? adapter.reasoning : reasoning;
+      const completion = { id: last.id || `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: last.created || Math.floor(Date.now()/1000), model: input.model || last.model || 'qwen-instruct', choices: [{ index: 0, message: { role: 'assistant', content: parsed.content, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls}:{}) }, finish_reason: finish }], ...(last.usage ? { usage: last.usage } : {}) };
       if (adapter) {
         const result = await adapter.finish(completion,input.stream);
         if (input.stream) res.end();

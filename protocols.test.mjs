@@ -109,3 +109,46 @@ test('两个协议在上游结束前发送首个文本增量',async()=>{
     }finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
   }
 });
+
+test('Responses reasoning summary 与 Messages thinking 同时支持 JSON、SSE 和历史回传',async()=>{
+  const encoder=new TextEncoder();
+  for(const [path,body] of requests) for(const stream of [false,true]) {
+    const server=createServer({key:'test',token:'token',group:'g',timeout:2000},async()=>{
+      const chunks=[
+        {choices:[{index:0,delta:{reasoning_content:'先思考'},finish_reason:null}]},
+        {choices:[{index:0,delta:{content:'后回答'},finish_reason:null}]},
+        {choices:[{index:0,delta:{},finish_reason:'stop'}]}
+      ];
+      return new Response(chunks.map(x=>`data: ${JSON.stringify(x)}\n\n`).join(''),{headers:{'content-type':'text/event-stream'}});
+    },confirmedModels);
+    await listenForFetch(server);
+    try {
+      const response=await fetch(`http://127.0.0.1:${server.address().port}${path}`,{method:'POST',headers:{authorization:'Bearer test','content-type':'application/json'},body:JSON.stringify({...body,stream})});
+      assert.equal(response.status,200);
+      if(!stream) {
+        const json=await response.json();
+        if(path==='/v1/responses') {
+          assert.equal(json.output[0].type,'reasoning');assert.equal(json.output[0].summary[0].text,'先思考');
+          assert.equal(json.output[1].content[0].text,'后回答');
+          const history=normalizeRequest(path,{input:[{type:'reasoning',summary:json.output[0].summary},{role:'assistant',content:json.output[1].content},{role:'user',content:'继续'}]});
+          assert.match(history.messages[0].content,/先思考/);
+        } else {
+          assert.equal(json.content[0].type,'thinking');assert.equal(json.content[0].thinking,'先思考');
+          assert.equal(json.content[1].text,'后回答');
+          const history=normalizeRequest(path,{messages:[{role:'assistant',content:json.content},{role:'user',content:'继续'}],max_tokens:64});
+          assert.match(history.messages[0].content,/先思考/);
+        }
+      } else {
+        const frames=(await Array.fromAsync(events(response.body))).map(x=>JSON.parse(x.data));
+        if(path==='/v1/responses') {
+          assert.equal(frames.filter(x=>x.type==='response.reasoning_summary_text.delta').map(x=>x.delta).join(''),'先思考');
+          assert.equal(frames.find(x=>x.type==='response.output_item.added').item.type,'reasoning');
+          assert.deepEqual(frames.at(-1).response.output.map(x=>x.type),['reasoning','message']);
+        } else {
+          assert.equal(frames.find(x=>x.delta?.type==='thinking_delta').delta.thinking,'先思考');
+          assert.deepEqual(frames.at(-2).usage.output_tokens>=0,true);
+        }
+      }
+    } finally {server.closeAllConnections();await new Promise(r=>server.close(r));}
+  }
+});

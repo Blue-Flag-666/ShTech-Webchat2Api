@@ -17,14 +17,18 @@ export function normalizeRequest(path, input) {
   if (path === '/v1/chat/completions') return input;
   const out = { model: input.model, stream: input.stream, messages: [] };
   if (path === '/v1/responses') {
-    keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata']);
+    keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning']);
     if (input.store === true || input.previous_response_id != null) throw bad('当前 Responses 为无状态接口，请使用 store:false 并传入完整历史');
     if (input.store !== undefined && typeof input.store !== 'boolean') throw bad('store 必须为布尔值');
     if (input.instructions != null) out.messages.push({role:'system',content:text(input.instructions)});
     const items = typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
     if (!Array.isArray(items)) throw bad('input 必须为字符串或输入项数组');
     for (const item of items) {
-      if (item?.type === 'function_call') {
+      if (item?.type === 'reasoning') {
+        if (!Array.isArray(item.summary)) throw bad('reasoning.summary 必须为数组');
+        const summary=text(item.summary,['summary_text']);
+        if (summary) out.messages.push({role:'assistant',content:`[Reasoning summary]\n${summary}`});
+      } else if (item?.type === 'function_call') {
         const call = {id:item.call_id,type:'function',function:{name:item.name,arguments:item.arguments}};
         const previous = out.messages.at(-1);
         if (previous?.role === 'assistant' && previous.tool_calls) previous.tool_calls.push(call);
@@ -44,7 +48,7 @@ export function normalizeRequest(path, input) {
       ? {type:input.tool_choice.type,function:{name:input.tool_choice.name}} : input.tool_choice;
     out.max_tokens = input.max_output_tokens;
   } else {
-    keys(input, ['model','messages','system','stream','max_tokens','tools','tool_choice','metadata']);
+    keys(input, ['model','messages','system','stream','max_tokens','tools','tool_choice','metadata','thinking']);
     if (!Number.isInteger(input.max_tokens) || input.max_tokens < 1) throw bad('max_tokens 必须为正整数');
     out.max_tokens = input.max_tokens;
     if (input.system != null) out.messages.push({role:'system',content:text(input.system,['text'])});
@@ -56,6 +60,7 @@ export function normalizeRequest(path, input) {
       const m = {role:message.role,content:''}, results = [];
       for (const block of message.content) {
         if (block?.type === 'text') m.content += text([block],['text']);
+        else if (block?.type === 'thinking' && message.role === 'assistant' && typeof block.thinking === 'string') m.content += `${m.content?'\n':''}[Reasoning summary]\n${block.thinking}`;
         else if (block?.type === 'tool_use' && message.role === 'assistant') {
           (m.tool_calls ||= []).push({id:block.id,type:'function',function:{name:block.name,arguments:JSON.stringify(block.input)}});
         } else if (block?.type === 'tool_result' && message.role === 'user') {
@@ -92,8 +97,8 @@ export class ProtocolOutput {
   constructor(path, input, emit, original = {}) {
     this.path=path; this.input=input; this.emit=emit; this.sequence=0;
     this.id=id(path === '/v1/responses' ? 'resp' : 'msg');
-    this.messageId=id('msg'); this.created=Math.floor(Date.now()/1000);
-    this.text=''; this.started=false; this.block=false;
+    this.messageId=id('msg'); this.reasoningId=id('rs'); this.created=Math.floor(Date.now()/1000);
+    this.text=''; this.reasoning=''; this.started=false; this.textIndex=null; this.reasoningIndex=null; this.nextIndex=0;
     this.metadata=original.metadata || {};
   }
   async event(type, data={}) {
@@ -105,13 +110,15 @@ export class ProtocolOutput {
       incomplete_details:status === 'incomplete' ? {reason:'max_output_tokens'} : null,
       model:this.input.model || 'qwen-instruct',output,usage,store:false,parallel_tool_calls:true,
       tool_choice:typeof this.input.tool_choice === 'object' ? {type:'function',name:this.input.tool_choice.function.name} : this.input.tool_choice || 'auto',
-      tools:(this.input.tools || []).map(t=>({type:'function',...t.function})),metadata:this.metadata};
+      tools:(this.input.tools || []).map(t=>({type:'function',...t.function})),metadata:this.metadata,
+      reasoning:{effort:null,summary:this.reasoning? 'auto':null}};
   }
   message(content=[],stop_reason=null,usage={input_tokens:0,output_tokens:0}) {
     return {id:this.id,type:'message',role:'assistant',model:this.input.model || 'qwen-instruct',content,stop_reason,stop_sequence:null,usage};
   }
   part(value) { return {type:'output_text',text:value,annotations:[],logprobs:[]}; }
   item(value,status='completed') { return {id:this.messageId,type:'message',status,role:'assistant',content:[this.part(value)]}; }
+  reasoningItem(status='completed') { return {id:this.reasoningId,type:'reasoning',status,summary:[{type:'summary_text',text:this.reasoning}]}; }
   async start() {
     if (this.started) return;
     this.started=true;
@@ -124,41 +131,71 @@ export class ProtocolOutput {
     if (!value) return;
     await this.start();
     const response=this.path === '/v1/responses';
-    if (!this.block) {
-      this.block=true;
+    if (this.textIndex===null) {
+      this.textIndex=this.nextIndex++;
       if (response) {
-        await this.event('response.output_item.added',{output_index:0,item:{...this.item('','in_progress'),content:[]}});
-        await this.event('response.content_part.added',{item_id:this.messageId,output_index:0,content_index:0,part:this.part('')});
-      } else await this.event('content_block_start',{index:0,content_block:{type:'text',text:''}});
+        await this.event('response.output_item.added',{output_index:this.textIndex,item:{...this.item('','in_progress'),content:[]}});
+        await this.event('response.content_part.added',{item_id:this.messageId,output_index:this.textIndex,content_index:0,part:this.part('')});
+      } else await this.event('content_block_start',{index:this.textIndex,content_block:{type:'text',text:''}});
     }
     this.text+=value;
-    if (response) await this.event('response.output_text.delta',{item_id:this.messageId,output_index:0,content_index:0,delta:value,logprobs:[]});
-    else await this.event('content_block_delta',{index:0,delta:{type:'text_delta',text:value}});
+    if (response) await this.event('response.output_text.delta',{item_id:this.messageId,output_index:this.textIndex,content_index:0,delta:value,logprobs:[]});
+    else await this.event('content_block_delta',{index:this.textIndex,delta:{type:'text_delta',text:value}});
+  }
+  async reasoningDelta(value) {
+    if (!value) return;
+    await this.start();
+    const response=this.path === '/v1/responses';
+    if (this.reasoningIndex===null) {
+      this.reasoningIndex=this.nextIndex++;
+      if(response) {
+        await this.event('response.output_item.added',{output_index:this.reasoningIndex,item:{id:this.reasoningId,type:'reasoning',status:'in_progress',summary:[]}});
+        await this.event('response.reasoning_summary_part.added',{item_id:this.reasoningId,output_index:this.reasoningIndex,summary_index:0,part:{type:'summary_text',text:''}});
+      } else await this.event('content_block_start',{index:this.reasoningIndex,content_block:{type:'thinking',thinking:'',signature:''}});
+    }
+    this.reasoning+=value;
+    if(response) await this.event('response.reasoning_summary_text.delta',{item_id:this.reasoningId,output_index:this.reasoningIndex,summary_index:0,delta:value});
+    else await this.event('content_block_delta',{index:this.reasoningIndex,delta:{type:'thinking_delta',thinking:value}});
   }
   async finish(completion, stream) {
     const message=completion.choices[0].message, calls=message.tool_calls || [];
     const usage=tokenUsage(completion,this.input), limited=completion.choices[0].finish_reason === 'length';
     const response=this.path === '/v1/responses';
-    const output=[];
-    if (message.content) output.push(response ? this.item(message.content,limited?'incomplete':'completed') : {type:'text',text:message.content});
-    for (const call of calls) output.push(response
+    if(message.reasoning_content && !this.reasoning) this.reasoning=message.reasoning_content;
+    const reasoningItem=response ? this.reasoningItem(limited?'incomplete':'completed') : {type:'thinking',thinking:this.reasoning,signature:''};
+    const messageItem=response ? this.item(message.content,limited?'incomplete':'completed') : {type:'text',text:message.content};
+    const callItems=calls.map(call=>response
       ? {id:id('fc'),type:'function_call',status:'completed',call_id:call.id,name:call.function.name,arguments:call.function.arguments}
       : {type:'tool_use',id:call.id,name:call.function.name,input:JSON.parse(call.function.arguments)});
+    let output=[];
+    if(!stream) output=[...(this.reasoning?[reasoningItem]:[]),...(message.content?[messageItem]:[]),...callItems];
     const result=response ? this.response(output,limited?'incomplete':'completed',usage)
       : this.message(output,calls.length?'tool_use':limited?'max_tokens':'end_turn',{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens});
     if (!stream) return result;
     await this.start();
-    if (!this.block && message.content) await this.delta(message.content);
-    if (this.block) {
+    if (this.reasoningIndex===null && this.reasoning) { const value=this.reasoning;this.reasoning='';await this.reasoningDelta(value); }
+    if (this.textIndex===null && message.content) await this.delta(message.content);
+    const indexed=[];
+    if (this.reasoningIndex!==null) {
+      indexed.push([this.reasoningIndex,reasoningItem]);
+      if(response) {
+        const loc={item_id:this.reasoningId,output_index:this.reasoningIndex,summary_index:0};
+        await this.event('response.reasoning_summary_text.done',{...loc,text:this.reasoning});
+        await this.event('response.reasoning_summary_part.done',{...loc,part:{type:'summary_text',text:this.reasoning}});
+        await this.event('response.output_item.done',{output_index:this.reasoningIndex,item:reasoningItem});
+      } else await this.event('content_block_stop',{index:this.reasoningIndex});
+    }
+    if (this.textIndex!==null) {
+      indexed.push([this.textIndex,messageItem]);
       if (response) {
-        const loc={item_id:this.messageId,output_index:0,content_index:0};
+        const loc={item_id:this.messageId,output_index:this.textIndex,content_index:0};
         await this.event('response.output_text.done',{...loc,text:this.text,logprobs:[]});
         await this.event('response.content_part.done',{...loc,part:this.part(this.text)});
-        await this.event('response.output_item.done',{output_index:0,item:output[0]});
-      } else await this.event('content_block_stop',{index:0});
+        await this.event('response.output_item.done',{output_index:this.textIndex,item:messageItem});
+      } else await this.event('content_block_stop',{index:this.textIndex});
     }
-    for (let index=this.block?1:0;index<output.length;index++) {
-      const item=output[index];
+    for (const item of callItems) {
+      const index=this.nextIndex++;indexed.push([index,item]);
       if (response) {
         await this.event('response.output_item.added',{output_index:index,item:{...item,status:'in_progress',arguments:''}});
         await this.event('response.function_call_arguments.delta',{item_id:item.id,output_index:index,delta:item.arguments});
@@ -170,6 +207,8 @@ export class ProtocolOutput {
         await this.event('content_block_stop',{index});
       }
     }
+    output=indexed.sort((a,b)=>a[0]-b[0]).map(x=>x[1]);
+    if(response) Object.assign(result,{output}); else Object.assign(result,{content:output});
     if (response) await this.event(limited?'response.incomplete':'response.completed',{response:result});
     else {
       await this.event('message_delta',{delta:{stop_reason:result.stop_reason,stop_sequence:null},usage:{output_tokens:usage.output_tokens}});
