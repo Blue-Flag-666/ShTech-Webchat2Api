@@ -1,0 +1,17 @@
+# 资源测量
+
+2026-09-13，本机 Windows x64，Node v24.19.0，命令 `node profile.mjs`。脚本不读取 .env、不访问学校，每种协议启动独立进程，模拟 4 MiB ASCII 回复，以本地 HTTP 客户端持续读取流。
+
+| 协议 | 基线 RSS | 峰值 RSS | 耗时 | 下行字节 |
+|---|---:|---:|---:|---:|
+| Chat Completions | 59 MiB | 86 MiB | 118 ms | 4,273,233 |
+| Responses | 59 MiB | 118 MiB | 223 ms | 21,189,141 |
+| Messages | 59 MiB | 92 MiB | 179 ms | 4,312,716 |
+
+这些值包含代理、模拟上游和读取客户端的总内存，不是单独服务进程或容器数据。合成回复用于压力测量，明显长于常规回复；数据不表示真实模型生成速度、网络性能、学校 token 上限或树莓派性能。单次结果受运行时和系统状态影响。
+
+Chat 普通流式只转发分块，不累计回答。Responses 的 done、item.done 和 completed 事件包含完整输出，导致同一正文多次经过网络，峰值也较高。模型目录限制 2 MiB、SSE 单事件限制 1 MiB、累计输出限制 8 MiB，超限取消上游。
+
+镜像无第三方 npm 运行依赖，不包含测试、基准脚本或文档。构建上下文使用允许列表，只发送 Dockerfile、运行源码、package.json 和无秘密的 .env.example。基础镜像仍为 node:22-alpine，实际压缩镜像大小、Linux/arm64 RSS 和树莓派实机表现尚未测量。
+
+可在目标设备检出源码后运行 `node profile.mjs` 复测；实际部署还需测量 `docker stats --no-stream` 和镜像清单中各架构层大小。目前不能据此承诺固定最低内存。

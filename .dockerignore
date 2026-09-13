@@ -1,0 +1,12 @@
+# Allow only files explicitly needed by the runtime image.
+*
+!Dockerfile
+!package.json
+!server.mjs
+!transport.mjs
+!models.mjs
+!auth.mjs
+!tools.mjs
+!protocols.mjs
+!lifecycle.mjs
+!.env.example

@@ -1,0 +1,69 @@
+const invalid = message => Object.assign(new Error(message), { status: 400 });
+const upstreamError = message => Object.assign(new Error(message), { status: 502 });
+export function toolPolicy(tools, choice = 'auto') {
+  if (tools === undefined) {
+    if (choice !== 'auto' && choice !== 'none') throw invalid('tool_choice 需要 tools');
+    return null;
+  }
+  if (!Array.isArray(tools) || tools.length > 64) throw invalid('tools 必须为数组，最多 64 个');
+  const names = new Set();
+  for (const tool of tools) {
+    const f = tool?.function;
+    if (tool?.type !== 'function' || typeof f?.name !== 'string' || !/^[\w-]{1,64}$/.test(f.name) || names.has(f.name)) throw invalid('工具必须具有唯一的 function.name');
+    if (f.parameters !== undefined && (!f.parameters || typeof f.parameters !== 'object' || Array.isArray(f.parameters))) throw invalid('工具 parameters 必须是 JSON Schema 对象');
+    names.add(f.name);
+  }
+  let required = choice === 'required', allowed = names;
+  if (choice && typeof choice === 'object') {
+    if (choice.type !== 'function' || !names.has(choice.function?.name)) throw invalid('tool_choice 指定了未知工具');
+    allowed = new Set([choice.function.name]); required = true;
+  } else if (!['auto','none','required'].includes(choice)) throw invalid('无效 tool_choice');
+  if (required && !names.size) throw invalid('required 至少需要一个工具');
+  if (choice === 'none' || !names.size) return null;
+  return { tools: tools.filter(t=>allowed.has(t.function.name)), allowed, required };
+}
+export function toolPrompt(policy) {
+  if (!policy) return '';
+  return `You may request external tools by emitting exactly one or more blocks in this format:\n<tool_call>{"name":"tool_name","arguments":{}}</tool_call>\nUse only the declared tools and JSON objects for arguments. Do not claim to have executed tools. ${policy.required ? 'You must request at least one tool.' : 'If no tool is needed, reply normally.'}\nTool declarations:\n${JSON.stringify(policy.tools.map(t=>t.function))}`;
+}
+export function parseToolCalls(text, policy, makeId) {
+  if (!policy) return { content: text, tool_calls: [] };
+  const calls = [];
+  const content = text.replace(/<tool_call>([\s\S]*?)<\/tool_call>/g, (_,raw)=>{
+    let parsed;
+    try { parsed=JSON.parse(raw); } catch { throw upstreamError('模型输出了无法解析的工具调用'); }
+    if (!policy.allowed.has(parsed.name) || !parsed.arguments || typeof parsed.arguments !== 'object' || Array.isArray(parsed.arguments)) throw upstreamError('模型输出了不允许的工具或无效参数');
+    calls.push({id:makeId(),type:'function',function:{name:parsed.name,arguments:JSON.stringify(parsed.arguments)}});
+    if (calls.length > 64) throw upstreamError('模型工具调用数量超过限制');
+    return '';
+  }).trim();
+  if (content.includes('<tool_call>') || content.includes('</tool_call>')) throw upstreamError('工具调用块未完整结束');
+  if (policy.required && !calls.length) throw upstreamError('模型未遵循 required 工具调用约束');
+  return { content: content || null, tool_calls: calls };
+}
+export function normalizeMessages(messages, policy) {
+  if (!Array.isArray(messages) || !messages.length) throw invalid('messages 必须是非空数组');
+  const result=[]; const pending=new Set();
+  const prompt=toolPrompt(policy); if(prompt) result.push({role:'system',content:prompt});
+  for(const m of messages) {
+    if(!m || !['user','assistant','system','developer','tool'].includes(m.role)) throw invalid('不支持的消息角色');
+    if(m.role==='tool') {
+      if(typeof m.content!=='string' || !pending.delete(m.tool_call_id)) throw invalid('tool 消息没有匹配的 tool_call_id');
+      result.push({role:'user',content:`Tool result (${m.tool_call_id}):\n${m.content}`});continue;
+    }
+    if(pending.size) throw invalid('必须先返回所有待处理工具结果');
+    if(m.content!=null && typeof m.content!=='string') throw invalid('当前仅支持文本消息');
+    let content=m.content||'';
+    if(m.tool_calls!==undefined) {
+      if(m.role!=='assistant' || !Array.isArray(m.tool_calls)) throw invalid('tool_calls 仅适用于 assistant');
+      for(const tc of m.tool_calls) {
+        if(typeof tc.id!=='string' || pending.has(tc.id) || tc.type!=='function' || typeof tc.function?.name!=='string') throw invalid('无效的历史 tool_calls');
+        let args;try{args=JSON.parse(tc.function.arguments);}catch{throw invalid('历史工具参数必须是 JSON');}
+        pending.add(tc.id);content+=`\n<tool_call>${JSON.stringify({name:tc.function.name,arguments:args})}</tool_call>`;
+      }
+    }
+    result.push({role:m.role==='developer'?'system':m.role,content});
+  }
+  if(pending.size) throw invalid('缺少工具调用结果');
+  return result;
+}

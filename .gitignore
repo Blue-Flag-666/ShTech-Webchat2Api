@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+secrets/
+*.har
+headers.txt
+node_modules/
