@@ -46,7 +46,7 @@ jobs:
           push: false
           tags: shtech-webchat2api:test
           load: true
-      - run: docker run --rm --platform linux/${{ matrix.arch }} --entrypoint node -v "$PWD:/tests:ro" -w /tests shtech-webchat2api:test --test
+      - run: docker run --rm --platform linux/${{ matrix.arch }} --entrypoint node -v "$PWD:/tests:ro" -w /tests shtech-webchat2api:test --test test/*.test.mjs
       - name: Check packaged service
         run: |
           docker run -d --name proxy --platform linux/${{ matrix.arch }} -e API_KEY=ci-local-key -p 127.0.0.1:8787:8787 shtech-webchat2api:test
