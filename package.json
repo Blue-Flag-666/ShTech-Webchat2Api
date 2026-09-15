@@ -1,17 +1,20 @@
 {
   "name": "shanghaitech-webchat-api",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=26"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env server.mjs",
+    "start": "node src/cli.mjs",
+    "build:cli": "node scripts/build-cli.mjs",
     "test": "node --test",
-    "test:sdk": "node --test sdk-compat.ci.mjs"
+    "test:sdk": "node --test test/sdk-compat.ci.mjs"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.125.0",
+    "esbuild": "^0.28.2",
     "openai": "^7.15.0"
   }
 }

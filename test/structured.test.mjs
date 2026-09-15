@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { outputPolicy, outputPrompt, parseStructured } from './structured.mjs';
-import { createServer, events } from './server.mjs';
+import { outputPolicy, outputPrompt, parseStructured } from '../src/structured.mjs';
+import { createServer, events } from '../src/server.mjs';
 import { listenForFetch, confirmedModels } from './fixtures.mjs';
 
 const schema={type:'object',properties:{name:{type:'string',minLength:1},count:{type:'integer',minimum:1},tags:{type:'array',items:{type:'string'}}},required:['name','count'],additionalProperties:false};
@@ -16,12 +16,18 @@ test('三个协议识别各自 JSON Schema 位置',()=>{
 test('结构化结果解析、规范化并验证常用约束',()=>{
   const policy={type:'json_schema',schema};
   assert.equal(parseStructured(' { "name": "测试", "count": 2, "tags": ["a"] } ',policy),'{"name":"测试","count":2,"tags":["a"]}');
+  assert.equal(parseStructured('结果如下：\n```json\n{"name":"测试","count":2}\n```',policy),'{"name":"测试","count":2}');
   for(const value of ['not json','[]','{"name":"","count":2}','{"name":"x","count":0}','{"name":"x","count":1,"extra":true}'])assert.throws(()=>parseStructured(value,policy));
 });
 test('拒绝未知关键字、外部引用和错误格式定义',()=>{
   assert.throws(()=>outputPolicy('/v1/responses',{text:{format:{type:'json_schema',name:'x',schema:{type:'object',unevaluatedProperties:false}}}}),/关键字/);
   assert.throws(()=>outputPolicy('/v1/responses',{text:{format:{type:'json_schema',name:'x',schema:{$ref:'https://example.com/schema'}}}}),/本地/);
   assert.throws(()=>outputPolicy('/v1/chat/completions',{response_format:{type:'json_schema',json_schema:{name:'bad name',schema}}}),/name/);
+});
+test('验证常用 JSON Schema format',()=>{
+  const policy={type:'json_schema',schema:{type:'object',properties:{id:{type:'string',format:'uuid'},ip:{type:'string',format:'ipv4'}},required:['id','ip']}};
+  assert.doesNotThrow(()=>parseStructured('{"id":"123e4567-e89b-12d3-a456-426614174000","ip":"127.0.0.1"}',policy));
+  assert.throws(()=>parseStructured('{"id":"bad","ip":"999.0.0.1"}',policy),/格式/);
 });
 
 test('三个 HTTP 协议在返回成功前验证 JSON，流式只发送已验证结果',async()=>{

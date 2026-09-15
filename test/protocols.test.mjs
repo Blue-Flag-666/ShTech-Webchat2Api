@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer, events } from './server.mjs';
-import { normalizeRequest } from './protocols.mjs';
+import { createServer, events } from '../src/server.mjs';
+import { normalizeRequest } from '../src/protocols.mjs';
 import { listenForFetch, confirmedModels } from './fixtures.mjs';
 
 async function fixture(fn, answer='你好', finish='stop') {
@@ -14,7 +14,7 @@ async function fixture(fn, answer='你好', finish='stop') {
   },confirmedModels);
   await listenForFetch(server);
   const call=(path,body,key='test')=>fetch(`http://127.0.0.1:${server.address().port}${path}`,{method:'POST',headers:{'content-type':'application/json',...(path==='/v1/messages'?{'x-api-key':key}:{authorization:`Bearer ${key}`})},body:JSON.stringify(body)});
-  try {await fn(call);}finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
+  try {await fn(call,`http://127.0.0.1:${server.address().port}`);}finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
 }
 const requests=[['/v1/responses',{input:'你好',store:false}],['/v1/messages',{messages:[{role:'user',content:'你好'}],max_tokens:64}]];
 test('两个协议非流式返回结构、鉴权和上游 usage',async()=>{
@@ -23,7 +23,9 @@ test('两个协议非流式返回结构、鉴权和上游 usage',async()=>{
       assert.equal((await call(path,body,'wrong')).status,401);
       const res=await call(path,body);assert.equal(res.status,200);
       const json=await res.json();assert.equal(json.usage.input_tokens,10);assert.equal(json.usage.output_tokens,3);
+      if(path==='/v1/responses')assert.equal(json.usage.input_tokens_details.cached_tokens,0);
       assert.equal(path==='/v1/responses'?json.output[0].content[0].text:json.content[0].text,'你好');
+      if(path==='/v1/responses')assert.equal(json.output_text,'你好');
     }
   });
 });
@@ -46,6 +48,17 @@ test('协议流式增量重建完整回答，事件索引一致且结束唯一',
         assert.equal(frames.at(-2).delta.stop_reason,'end_turn');
       }
     }
+  });
+});
+test('Responses 可保存、续接、读取输入项和删除',async()=>{
+  await fixture(async(call,base)=>{
+    const first=await(await call('/v1/responses',{input:'第一问',store:true})).json();assert.equal(first.store,true);
+    const headers={authorization:'Bearer test'};
+    const saved=await fetch(`${base}/v1/responses/${first.id}`,{headers});assert.equal(saved.status,200);assert.equal((await saved.json()).id,first.id);
+    const items=await fetch(`${base}/v1/responses/${first.id}/input_items`,{headers});assert.equal((await items.json()).data[0].content[0].text,'第一问');
+    const next=await call('/v1/responses',{input:'第二问',previous_response_id:first.id,store:true});assert.equal(next.status,200);
+    const removed=await fetch(`${base}/v1/responses/${first.id}`,{method:'DELETE',headers});assert.equal((await removed.json()).deleted,true);
+    assert.equal((await fetch(`${base}/v1/responses/${first.id}`,{headers})).status,404);
   });
 });
 test('协议工具调用可回传历史并对应 call ID',async()=>{
@@ -104,11 +117,40 @@ test('截断流不会产生协议成功结束事件，长度截断标记 incompl
     assert.equal(JSON.parse(frames.at(-1).data).response.incomplete_details.reason,'max_output_tokens');
   },'部分','length');
 });
-test('拒绝不可兑现的状态和内容能力',()=>{
-  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',store:true}),/无状态/);
-  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',previous_response_id:'resp_x'}),/无状态/);
+test('接受本地 Responses 状态参数并拒绝无效内容能力',()=>{
+  assert.equal(normalizeRequest('/v1/responses',{input:'x',store:true}).messages[0].content,'x');
+  assert.equal(normalizeRequest('/v1/responses',{input:'x',previous_response_id:'resp_x'}).messages[0].content,'x');
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',previous_response_id:''}),/非空字符串/);
   assert.throws(()=>normalizeRequest('/v1/responses',{input:[{role:'user',content:[{type:'input_image',image_url:'https://example.com'}]}]}),/内容块/);
-  assert.throws(()=>normalizeRequest('/v1/messages',{messages:[],max_tokens:1,temperature:1}),/temperature/);
+  const anthropic=normalizeRequest('/v1/messages',{messages:[],max_tokens:1,temperature:1,top_p:.8,top_k:20,stop_sequences:['END']});
+  assert.equal(anthropic.temperature,1);assert.deepEqual(anthropic.stop,['END']);
+});
+
+test('Chat 兼容旧版 functions/function_call，Responses 接受常用选项',()=>{
+  const chat=normalizeRequest('/v1/chat/completions',{messages:[{role:'user',content:'x'}],functions:[{name:'run',parameters:{type:'object'}}],function_call:{name:'run'}});
+  assert.equal(chat.tools[0].function.name,'run');assert.equal(chat.tool_choice.function.name,'run');assert.equal(chat.functions,undefined);
+  const response=normalizeRequest('/v1/responses',{input:'x',temperature:.5,top_p:.9,service_tier:'auto',safety_identifier:'local'});
+  assert.equal(response.temperature,.5);assert.equal(response.top_p,.9);
+});
+test('Responses reasoning 与 Anthropic thinking 转成推理强度',()=>{
+  assert.equal(normalizeRequest('/v1/responses',{input:'x',reasoning:{effort:'high'}}).reasoning_effort,'high');
+  assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,thinking:{type:'enabled',budget_tokens:16}}).reasoning_effort,'high');
+});
+test('Anthropic 可关闭并行工具调用',()=>{
+  const value=normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,tools:[{name:'a',input_schema:{type:'object'}}],tool_choice:{type:'auto',disable_parallel_tool_use:true}});
+  assert.equal(value.parallel_tool_calls,false);
+});
+test('三种协议的服务端搜索映射到 netGo',()=>{
+  assert.equal(normalizeRequest('/v1/chat/completions',{messages:[{role:'user',content:'新闻'}],web_search_options:{}}).net_go,true);
+  const response=normalizeRequest('/v1/responses',{input:'新闻',tools:[{type:'web_search'}]});assert.equal(response.net_go,true);assert.deepEqual(response.tools,[]);
+  const message=normalizeRequest('/v1/messages',{messages:[{role:'user',content:'新闻'}],max_tokens:32,tools:[{type:'web_search_20250305',name:'web_search'}]});assert.equal(message.net_go,true);assert.deepEqual(message.tools,[]);
+});
+
+test('Legacy Completions 转成单轮续写并拒绝不可兑现选项',()=>{
+  const value=normalizeRequest('/v1/completions',{model:'qwen-code',prompt:'const x = ',suffix:';\n',max_tokens:32,n:1,echo:false});
+  assert.equal(value.messages.at(-1).role,'user');assert.match(value.messages.at(-1).content,/PREFIX/);assert.equal(value.max_tokens,32);
+  assert.throws(()=>normalizeRequest('/v1/completions',{prompt:['a','b']}),/单个字符串/);
+  assert.throws(()=>normalizeRequest('/v1/completions',{prompt:'a',n:2}),/n 仅支持 1/);
 });
 
 test('两个协议在上游结束前发送首个文本增量',async()=>{

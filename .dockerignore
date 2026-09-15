@@ -4,12 +4,6 @@
 !package.json
 !THIRD_PARTY_LICENSES/
 !THIRD_PARTY_LICENSES/Node.js.txt
-!server.mjs
-!transport.mjs
-!models.mjs
-!auth.mjs
-!tools.mjs
-!protocols.mjs
-!structured.mjs
-!lifecycle.mjs
+!src/
+!src/*.mjs
 !.env.example

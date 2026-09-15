@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loginCas, TokenManager, encryptPassword } from './auth.mjs';
+import { loginCas, TokenManager, encryptPassword } from '../src/auth.mjs';
 import { createDecipheriv } from 'node:crypto';
 
 test('CAS 加密前缀和 IV 保持 ASCII，解密后密码字符边界不变',()=>{

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { shutdown } from './lifecycle.mjs';
+import { shutdown } from '../src/lifecycle.mjs';
 import { listenForFetch } from './fixtures.mjs';
 
 test('停止服务后允许已接收请求完成，多次关闭共享结果',async()=>{

@@ -71,6 +71,33 @@ jobs:
           echo "Idle container memory: $IDLE_MEMORY" >> "$GITHUB_STEP_SUMMARY"
       - if: always()
         run: docker rm -f proxy || true
+  cli:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            artifact: shtech-webchat2api-windows-x64.exe
+          - runner: windows-11-arm
+            artifact: shtech-webchat2api-windows-arm64.exe
+          - runner: ubuntu-24.04
+            artifact: shtech-webchat2api-linux-x64
+          - runner: ubuntu-24.04-arm
+            artifact: shtech-webchat2api-linux-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '26.8.2'
+          cache: npm
+      - run: npm ci
+      - run: npm run build:cli
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          path: dist/${{ matrix.artifact }}
+          archive: false
   publish:
     needs: image-test
     if: github.event_name != 'pull_request'
@@ -104,3 +131,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+  release-cli:
+    needs: cli
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+      - run: cd release && sha256sum * > SHA256SUMS.txt
+      - run: gh release create "$GITHUB_REF_NAME" release/* --generate-notes --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}

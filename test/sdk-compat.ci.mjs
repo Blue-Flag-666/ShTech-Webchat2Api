@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
-import { createServer } from './server.mjs';
+import { createServer } from '../src/server.mjs';
 import { listenForFetch, confirmedModels } from './fixtures.mjs';
 
 async function fixture(run) {
@@ -26,6 +26,8 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     assert.equal((await client.models.retrieve('qwen-instruct')).id,'qwen-instruct');
     const chat=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}]});
     assert.equal(chat.choices[0].message.content,'你好');
+    const completion=await client.completions.create({model:'qwen-instruct',prompt:'你'});
+    assert.equal(completion.choices[0].text,'你好');
     const chatStream=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}],stream:true,stream_options:{include_usage:true}});
     let chatText='',usage;for await(const chunk of chatStream){chatText+=chunk.choices[0]?.delta?.content || '';usage=chunk.usage || usage;}
     assert.equal(chatText,'你好');assert.equal(usage.total_tokens,3);

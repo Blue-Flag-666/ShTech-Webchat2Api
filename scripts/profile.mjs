@@ -1,7 +1,7 @@
 // Offline, synthetic end-to-end profile. Does not load .env or contact school.
 import { spawnSync } from 'node:child_process';
-import { createServer } from './server.mjs';
-import { listenForFetch, confirmedModels } from './fixtures.mjs';
+import { createServer } from '../src/server.mjs';
+import { listenForFetch, confirmedModels } from '../test/fixtures.mjs';
 
 const paths=['/v1/chat/completions','/v1/responses','/v1/messages'];
 if (!process.argv[2]) {

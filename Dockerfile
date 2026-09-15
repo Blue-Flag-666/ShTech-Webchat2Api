@@ -14,9 +14,10 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 # Runtime-only image: npm, Corepack, headers and tests stay in the build stage.
-COPY --chown=node:node package.json server.mjs transport.mjs models.mjs auth.mjs tools.mjs protocols.mjs structured.mjs lifecycle.mjs .env.example ./
+COPY --chown=node:node package.json .env.example ./
+COPY --chown=node:node src ./src
 USER node
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-ENTRYPOINT ["node", "--env-file-if-exists=.env", "server.mjs"]
+ENTRYPOINT ["node", "src/cli.mjs"]

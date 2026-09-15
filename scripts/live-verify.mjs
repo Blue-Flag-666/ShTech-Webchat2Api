@@ -1,8 +1,8 @@
 // Explicit opt-in live verification; reads configuration and consumes school quota.
 import assert from 'node:assert/strict';
-import { configuration, createServer, events } from './server.mjs';
-import { listenForFetch } from './fixtures.mjs';
-import { upstreamFetch } from './transport.mjs';
+import { configuration, createServer, events } from '../src/server.mjs';
+import { listenForFetch } from '../test/fixtures.mjs';
+import { upstreamFetch } from '../src/transport.mjs';
 
 const config=configuration();
 if(process.argv.includes('--cas'))config.token='';
@@ -29,14 +29,14 @@ const model='qwen-instruct';
 const plain='请只回复：API连接成功';
 const question='请调用 echo 工具，value 参数为“工具连接成功”。';
 const fn={name:'echo',description:'返回输入文本的测试工具',parameters:{type:'object',properties:{value:{type:'string'}},required:['value']}};
-const paths=['/v1/chat/completions','/v1/responses','/v1/messages'];
+const paths=['/v1/chat/completions','/v1/completions','/v1/responses','/v1/messages'];
 async function call(path,body){
   const response=await fetch(base+path,{method:'POST',headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json'},body:JSON.stringify({model,...body}),signal:AbortSignal.timeout(config.timeout+15000)});
   if(!response.ok){const error=await response.json();throw new Error(`${path}: HTTP ${response.status}: ${error.error?.message}`);}
   return response;
 }
-function input(path,prompt){return path==='/v1/responses'?{input:prompt,store:false}:{messages:[{role:'user',content:prompt}],max_tokens:256};}
-function outputText(path,value){return path==='/v1/chat/completions'?value.choices[0].message.content:path==='/v1/responses'?value.output.filter(x=>x.type==='message').flatMap(x=>x.content).map(x=>x.text||'').join(''):value.content.filter(x=>x.type==='text').map(x=>x.text).join('');}
+function input(path,prompt){return path==='/v1/responses'?{input:prompt,store:false}:path==='/v1/completions'?{prompt,max_tokens:256}:{messages:[{role:'user',content:prompt}],max_tokens:256};}
+function outputText(path,value){return path==='/v1/chat/completions'?value.choices[0].message.content:path==='/v1/completions'?value.choices[0].text:path==='/v1/responses'?value.output.filter(x=>x.type==='message').flatMap(x=>x.content).map(x=>x.text||'').join(''):value.content.filter(x=>x.type==='text').map(x=>x.text).join('');}
 try {
   for(const path of paths){
     for(const stream of [false,true]){
@@ -45,12 +45,13 @@ try {
       else for await(const event of events(response.body)){
         if(event.data==='[DONE]'){finished=true;continue;}
         const value=JSON.parse(event.data);if(value.error)throw new Error(value.error.message);
-        text+=value.choices?.[0]?.delta?.content || (value.type==='response.output_text.delta'?value.delta:'') || (value.delta?.type==='text_delta'?value.delta.text:'');
+        text+=value.choices?.[0]?.delta?.content || value.choices?.[0]?.text || (value.type==='response.output_text.delta'?value.delta:'') || (value.delta?.type==='text_delta'?value.delta.text:'');
         if(['response.completed','message_stop'].includes(value.type))finished=true;
       }
-      assert.ok(finished && text.includes('API连接成功'));
+      assert.ok(finished && (path==='/v1/completions'?text.length>0:text.includes('API连接成功')));
       console.log(`${path}: ${stream?'SSE':'JSON'} OK`);
     }
+    if(path==='/v1/completions')continue;
     const request=input(path,question);
     if(path==='/v1/chat/completions'){request.tools=[{type:'function',function:fn}];request.tool_choice='required';}
     else if(path==='/v1/responses'){request.tools=[{type:'function',...fn}];request.tool_choice='required';}

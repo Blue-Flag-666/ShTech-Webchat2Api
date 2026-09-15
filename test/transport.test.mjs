@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readJsonLimited } from './transport.mjs';
+import { readJsonLimited } from '../src/transport.mjs';
 
 test('模型目录在字节上限内解码中文，超限时取消读取',async()=>{
   const bytes=new TextEncoder().encode('{"name":"通义千问"}');
