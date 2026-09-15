@@ -41,8 +41,13 @@ export function parseToolCalls(text, policy, makeId) {
     if(policy.custom?.has(value.name)&&typeof args.input!=='string')throw upstreamError('模型输出了无效的 custom 工具文本参数');
     const declaration=policy.tools.find(tool=>tool.function.name===value.name);
     if(declaration?.function?.parameters)try{validateSchemaValue(args,declaration.function.parameters);}catch{throw upstreamError(`模型输出的工具参数不符合 ${value.name} 的 JSON Schema`);}
-    const callId=typeof value.id==='string'&&value.id?value.id:makeId();
-    if(calls.some(call=>call.id===callId))throw upstreamError('模型输出了重复的工具调用 ID');
+    const suppliedId=typeof value.id==='string'&&value.id;
+    let callId=suppliedId?value.id:makeId();
+    if(calls.some(call=>call.id===callId)){
+      if(suppliedId)throw upstreamError('模型输出了重复的工具调用 ID');
+      const base=callId;let suffix=calls.length;
+      do{callId=`${base}_${suffix++}`;}while(calls.some(call=>call.id===callId));
+    }
     calls.push({id:callId,type:'function',function:{name:value.name,arguments:JSON.stringify(args)}});
     if(calls.length>64)throw upstreamError('模型工具调用数量超过限制');
     return true;

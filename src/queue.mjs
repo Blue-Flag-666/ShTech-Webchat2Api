@@ -7,9 +7,9 @@ export class RequestQueue {
     if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('排队超时必须为正数');
     this.limit=limit;this.maximum=maximum;this.timeout=timeout;this.active=0;this.waiting=[];
   }
-  acquire(signal) {
+  async acquire(signal) {
     if (signal?.aborted) throw failure(499,'客户端已断开');
-    if (this.active < this.limit) { this.active++; return Promise.resolve(this.release()); }
+    if (this.active < this.limit) { this.active++; return this.release(); }
     if (this.waiting.length >= this.maximum) throw failure(429,'请求队列已满，请稍后重试');
     return new Promise((resolve,reject)=>{
       const entry={resolve,reject,timer:null,abort:null,signal};

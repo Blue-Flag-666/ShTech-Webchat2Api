@@ -250,7 +250,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const adapter = path === '/v1/responses'||path==='/v1/messages' ? new ProtocolOutput(path,input,async frame=>{
         if (!res.headersSent) res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
         await write(res,frame);
-      },media.input);
+      },media.input) : null;
       const policy = toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls);
       const catalogue = await models();
       if (!catalogue.length) throw error(503, '模型目录没有已确认的自部署国内模型');
