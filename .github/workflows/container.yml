@@ -49,7 +49,7 @@ jobs:
       - run: docker run --rm --platform linux/${{ matrix.arch }} --entrypoint node -v "$PWD:/tests:ro" -w /tests shtech-webchat2api:test --test test/*.test.mjs
       - name: Check packaged service
         run: |
-          docker run -d --name proxy --platform linux/${{ matrix.arch }} -e API_KEY=ci-local-key -p 127.0.0.1:8787:8787 shtech-webchat2api:test
+          docker run -d --name proxy --platform linux/${{ matrix.arch }} -e API_KEY=ci-local-key -e GENAI_TOKEN=ci-placeholder-token -p 127.0.0.1:8787:8787 shtech-webchat2api:test
           for i in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:8787/healthz; then exit 0; fi
             sleep 2
