@@ -28,4 +28,4 @@ Responses 为无状态适配，不存储聊天记录。下一轮传入完整 inp
 
 2026-09-13 已通过学校 Qwen 验证三个协议的文本 JSON/SSE 和 echo 工具往返。可运行 `node --env-file=.env live-verify.mjs --cas` 复测；脚本会登录学校并发送 12 个测试请求，使用账号额度。该结果不代表任意工具、模型或客户端均已验证。工具提示使用普通 `<api_tool_call>` 文本标签；真实测试中 Qwen 对原 `<tool_call>` 提示返回空正文，故不再以该标签引导生成。
 
-事件格式参考 [OpenAI Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events) 和 [Anthropic streaming messages](https://platform.claude.com/docs/en/build-with-claude/streaming)。本地测试验证协议转换，不代表官方 SDK 或所有客户端均已实测。
+事件格式参考 [OpenAI Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events) 和 [Anthropic streaming messages](https://platform.claude.com/docs/en/build-with-claude/streaming)。当前锁定的 OpenAI 7.15.0 与 Anthropic 0.125.0 官方 SDK 已在 Windows/Linux CI 中验证模型查询及三个协议的 JSON/SSE 调用；这不代表所有 SDK 版本或 Codex/Claude Code 命令行均已实测。

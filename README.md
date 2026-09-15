@@ -38,7 +38,7 @@ console.log(await response.json());
 - 可用参数：`model`、`messages`、`stream`、`max_tokens` / `max_completion_tokens`（1–16384）、`stream_options.include_usage`、`chat_group_id`、`net_go`、`tools`、`tool_choice`。支持文本 user/assistant/system/developer 和配对的工具结果；模型支持列表与单模型查询。
 - 工具调用通过当前请求中的提示词声明和 `<api_tool_call>` JSON 解析实现；旧 `<tool_call>` 输出也可解析。Qwen 已真实验证三个协议的工具调用及结果回传。带工具声明的流式请求先缓冲完整回答，解析成功后输出工具分块；错误格式、未知工具及 required 未遵循会报错。代理不会执行工具。
 - Responses 支持文本 input、instructions、function/custom/namespace 工具、allowed_tools、推理摘要及调用结果历史；Messages 支持文本、system、thinking、tool_use/tool_result 和 `x-api-key` 鉴权。两个协议均有流式与非流式实现，详见 [PROTOCOLS.md](PROTOCOLS.md)。
-- 三个协议支持提示加本地校验形式的 JSON 对象/JSON Schema 输出；它不是上游原生约束解码。图片仍待实现，不宣称完整兼容所有客户端。
+- 三个协议支持提示加本地校验形式的 JSON 对象/JSON Schema 输出；它不是上游原生约束解码。国内 Xinference 路由没有已确认的视觉入口，因此图片和音频输入会明确返回 400。
 - CAS/OAuth 自动登录已通过真实账号登录验证（2026-09-13）。可配置 `GENAI_USERNAME` / `GENAI_PASSWORD`，也支持 `_FILE` secret 文件；仅 JWT 模式仍需手动更新过期凭证。当前需要网页会话 ID；若上游需要 Cookie，可填写 `GENAI_COOKIE`。
 - 同一服务一次只处理一个上游聊天请求，重叠请求返回 429，减少共用网页会话造成的冲突。不要在网页中同时操作同一会话。
 - 默认绑定回环地址，Docker 内监听 `0.0.0.0`，宿主机端口仍默认绑定回环。不会关闭 TLS 校验；运行环境需能够正常连接学校服务。
@@ -60,7 +60,7 @@ docker compose logs -f
 
 ## 验证
 
-`node --test`（或 `npm test`）使用本地模拟上游检查请求映射、中文跨字节 SSE、流式/非流式 HTTP 请求、截断、登录失败和超时。这些测试不能证明学校服务当前连通或会话有效；需要配置本人凭证后完成真实调用验证。
+`node --test`（或 `npm test`）使用模拟上游检查请求映射、中文跨字节 SSE、流式/非流式 HTTP 请求、截断、登录失败和超时。GitHub Actions 还用当前锁定的 OpenAI 与 Anthropic 官方 SDK 验证模型列表/单模型查询、Chat、Responses 和 Messages 的 JSON/SSE 调用。这些测试不能证明学校服务当前连通或会话有效；需要配置本人凭证后完成真实调用验证。
 
 配置完成后运行 `node --env-file=.env verify.mjs`，会发送一条简短测试消息到学校服务，输出 HTTP 状态和回答。此操作会使用该账号和已配置会话。
 

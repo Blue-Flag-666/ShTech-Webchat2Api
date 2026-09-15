@@ -21,14 +21,14 @@
 - 本地 Bearer API key、请求大小限制、单请求并发限制、客户端断开取消、超时和错误事件。
 - 学校上游不规范 CSP 响应头的兼容处理；固定上游、TLS 校验保持开启、不跟随重定向。
 
-2026-09-13 已进一步真实验证 CAS/OAuth 自动登录、国内自部署模型目录，以及三个协议的文本 JSON/SSE 和 function 工具往返。Chat 可保留 reasoning_content；Responses/Messages 已映射独立推理块，Responses 支持 custom/namespace/allowed_tools。Windows/Linux CI 与 amd64/arm64 镜像测试通过，GHCR 已发布且可匿名读取 manifest。图片因国内 xinference 上游缺少可复核入口而明确拒绝，广泛客户端仍待实测；不能宣称比参考项目完整。
+2026-09-13 已进一步真实验证 CAS/OAuth 自动登录、国内自部署模型目录，以及三个协议的文本 JSON/SSE 和 function 工具往返。Chat 可保留 reasoning_content；Responses/Messages 已映射独立推理块，Responses 支持 custom/namespace/allowed_tools。当前 OpenAI 7.15.0 与 Anthropic 0.125.0 官方 SDK 已在 Windows/Linux CI 验证；amd64/arm64 镜像测试通过，GHCR 已发布且可匿名读取 manifest。图片因国内 xinference 上游缺少可复核入口而明确拒绝，Codex/Claude Code 命令行端到端仍待实测；不能宣称比参考项目完整。
 
 ## 值得吸收的设计
 
 1. **token 管理**：已实现账号密码登录、JWT 过期刷新、HTTP/SSE 登录失效时最多一次重试。支持本地忽略提交的 .env 与 `_FILE` secrets；刷新 token 只保留在内存。
 2. **动态模型列表**：已读取真实目录，仅保留国内家族且 rootAiType 为 xinference 的记录；首次目录失败返回空列表，已确认目录可短暂缓存。
 3. **SSE 失败处理**：已识别首帧登录失效并在输出前重试，截断流返回错误；输出后不重试。业务错误和不同模型的非标准字段仍需持续兼容。
-4. **协议扩展**：如果目标是 Codex，优先参考 GenAI2Codex 的 Responses 接口；如果目标是 Claude Code，优先参考 cmjang/HeZeBang 的 Anthropic Messages 转换。两者都不应在没有真实回归测试前直接合并。
+4. **协议扩展**：已吸收 Codex Responses 和 Claude Code Messages 的常用无状态转换，并用官方 SDK 回归。客户端专有行为仍应在真实 Codex/Claude Code 命令行中验证后再宣称支持。
 5. **测试隔离**：HeZeBang 的测试把本地 mock、上游 transport 和显式 live 测试分开。当前项目已有 mock 端到端测试和真实 `verify.mjs`，可以沿用这个边界。
 
 ## jollyxenon 项目的特别比较
