@@ -100,7 +100,7 @@ jobs:
           archive: false
   publish:
     needs: image-test
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
