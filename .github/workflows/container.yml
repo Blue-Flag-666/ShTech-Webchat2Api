@@ -140,9 +140,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
+          pattern: shtech-webchat2api-*
           path: release
           merge-multiple: true
       - run: cd release && sha256sum * > SHA256SUMS.txt
-      - run: gh release create "$GITHUB_REF_NAME" release/* --generate-notes --title "$GITHUB_REF_NAME"
+      - run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --generate-notes --title "$GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ github.token }}
