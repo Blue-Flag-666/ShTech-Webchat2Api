@@ -127,6 +127,7 @@ npm start
 | `POST /v1/responses/{id}/cancel` | Bearer `API_KEY` | 取消 `background:true` 后台响应 | JSON |
 | `POST /v1/responses/compact`、`POST /v1/responses/input_tokens` | Bearer `API_KEY` | Kimi 压缩长上下文、估算 Responses 输入 token | JSON |
 | `/v1/conversations`、`/v1/conversations/{id}/items` | Bearer `API_KEY` | 创建、读取、更新、删除对话及分页管理对话项 | JSON |
+| `/v1/files`、`/v1/files/{id}`、`/v1/files/{id}/content` | Bearer `API_KEY` | 上传、列出、读取和删除 UTF-8 文本/代码文件 | JSON / 原文件 |
 | `POST /v1/messages` | `x-api-key` 或 Bearer | `messages`、system、tool_use/tool_result | `message_stop` |
 | `POST /v1/messages/count_tokens` | `x-api-key` 或 Bearer | 估算 Anthropic 输入 token | JSON |
 | `GET /v1/models` | Bearer `API_KEY` | 国内自部署模型列表 | JSON |
@@ -140,7 +141,7 @@ npm start
 
 Chat 支持 `max_tokens`、`max_completion_tokens`、`stream_options.include_usage`、`tools`、`tool_choice`、`response_format`、常用采样参数和 `net_go`；Kimi K3 的采样参数按官方范围校验。Responses 默认在进程内保存，支持 `item_reference`、`previous_response_id`、`conversation`、`background:true`、后台流式输出、按事件序号断线续传、Kimi 上下文压缩、输入 token 估算、`truncation:auto`、`context_management`、状态轮询、取消、读取、删除和输入项查询；`store:false` 会返回可回放的不透明 reasoning 数据，便于 OpenCode 继续多轮推理。Conversations 支持完整资源和对话项管理。状态默认保存一小时，服务重启后清空。
 
-图片支持 URL、Base64、用户输入及工具结果截图；程序会从学校公开网页自动读取上传凭据，`GENAI_UPLOAD_TOKEN` 只用于覆盖。Kimi K3 会被识别为视觉模型。Chat `web_search_options`、Responses `web_search` 和 Anthropic 服务端搜索工具会映射到 Webchat 的 `netGo`，搜索过程不会伪造原生工具事件。视频、音频、embeddings 和 reranker 尚未支持。请求默认按单并发排队，并对建立流之前的临时上游故障有限重试；并发、队列和重试次数均可通过 `.env` 调整。
+图片支持 URL、Base64、Files API 的 `file_id`、用户输入、工具结果截图和 `computer_call_output` 截图；程序会从学校公开网页自动读取上传凭据，`GENAI_UPLOAD_TOKEN` 只用于覆盖。Files API 文件保存在内存一小时，Responses `input_file` 及工具返回的文本/代码文件会带文件名注入上下文，默认单文件上限 2 MiB；PDF 等二进制文档尚不能由 Webchat 等价处理。Responses 还能回放 OpenCode 的 shell、apply patch、program 和 computer 工具历史。Kimi K3 会被识别为视觉模型。Chat `web_search_options`、Responses `web_search` 和 Anthropic 服务端搜索工具会映射到 Webchat 的 `netGo`，搜索过程不会伪造原生工具事件。视频、音频、embeddings 和 reranker 尚未支持。请求默认按单并发排队，并对建立流之前的临时上游故障有限重试；并发、队列和重试次数均可通过 `.env` 调整。
 
 ## 登录与验证
 

@@ -99,6 +99,27 @@ test('Responses custom 与 namespace 工具支持自由文本、流事件和历�
     assert.equal(normalized.messages.at(-1).tool_call_id,item.call_id);
   },'<api_tool_call>{"name":"apply_patch","arguments":{"input":"*** Begin Patch\\n*** End Patch"}}</api_tool_call>');
 });
+test('Responses 可回放 OpenCode shell、补丁、程序和电脑工具历史',()=>{
+  const input=[
+    {type:'local_shell_call',call_id:'call_shell',action:{command:['git','status']}},
+    {type:'local_shell_call_output',call_id:'call_shell',output:'clean'},
+    {type:'apply_patch_call',call_id:'call_patch',operation:{type:'update_file',path:'a.js',diff:'@@'}},
+    {type:'apply_patch_call_output',call_id:'call_patch',status:'completed',output:'Done'},
+    {type:'program',id:'prog_1',call_id:'call_program',code:'return 1',fingerprint:'fp'},
+    {type:'program_output',id:'out_1',call_id:'call_program',result:'1',status:'completed'},
+    {type:'computer_call',call_id:'call_computer',action:{type:'screenshot'}},
+    {type:'computer_call_output',call_id:'call_computer',output:{type:'computer_screenshot'}},
+    {type:'configuration_update',reasoning:{effort:'high'}},
+    {type:'compaction_trigger'},
+    {role:'user',content:'继续'}
+  ];
+  const value=normalizeRequest('/v1/responses',{input});
+  assert.equal(value.messages.filter(message=>message.tool_calls).length,4);
+  assert.equal(value.messages.find(message=>message.tool_calls?.[0].id==='call_patch').tool_calls[0].function.name,'__openai_apply_patch');
+  assert.equal(value.messages.find(message=>message.tool_call_id==='call_program').content,'1');
+  assert.match(value.messages.find(message=>message.role==='system').content,/high/);
+  assert.equal(value.messages.at(-1).content,'继续');
+});
 test('Responses allowed_tools 只向上游暴露允许的工具',()=>{
   const normalized=normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'a',parameters:{}},{type:'custom',name:'patch'}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'custom',name:'patch'}]}});
   assert.equal(normalized.tool_choice,'required');assert.equal(normalized.tools.length,1);assert.equal(normalized.tools[0].function.name,'patch');assert.equal(normalized.tools[0].custom,true);

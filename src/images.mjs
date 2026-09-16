@@ -90,6 +90,9 @@ export function extractImages(path,input) {
     if(Array.isArray(value.input))for(const item of value.input){
       if(item&&(!item.type||item.type==='message'))item.content=content(item.content,item.role,images);
       else if(['function_call_output','custom_tool_call_output'].includes(item?.type))item.output=content(item.output,'tool',images);
+      else if(item?.type==='computer_call_output'&&item.output?.type==='computer_screenshot'){
+        const url=imageUrl(item.output);if(!url)throw invalid('computer_screenshot 缺少 image_url');images.push(url);item.output={...item.output,image_url:undefined};
+      }
     }
   } else if(path==='/v1/messages') {
     if(Array.isArray(value.messages))for(const message of value.messages){

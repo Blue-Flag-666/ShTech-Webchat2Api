@@ -11,6 +11,8 @@ test('三种协议的图片块转成文本消息和统一图片输入',()=>{
   assert.equal(responses.input.input[0].content,'看图');assert.equal(responses.images.length,1);
   const toolOutput=extractImages('/v1/responses',{input:[{type:'function_call_output',call_id:'call_1',output:[{type:'input_text',text:'截图'},{type:'input_image',image_url:`data:image/png;base64,${png}`}]}]});
   assert.equal(toolOutput.input.input[0].output,'截图');assert.equal(toolOutput.images.length,1);
+  const computer=extractImages('/v1/responses',{input:[{type:'computer_call_output',call_id:'call_2',output:{type:'computer_screenshot',image_url:`data:image/png;base64,${png}`}}]});
+  assert.equal(computer.images.length,1);assert.equal(computer.input.input[0].output.image_url,undefined);
   const messages=extractImages('/v1/messages',{messages:[{role:'user',content:[{type:'text',text:'看图'},{type:'image',source:{type:'base64',media_type:'image/png',data:png}}]}]});
   assert.equal(messages.input.messages[0].content.length,1);assert.match(messages.images[0],/^data:image\/png/);
 });

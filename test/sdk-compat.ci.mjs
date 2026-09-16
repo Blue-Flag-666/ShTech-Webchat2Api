@@ -26,6 +26,12 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     const client=new OpenAI({apiKey:'test',baseURL:`${base}/v1`,maxRetries:0});
     const models=await client.models.list();assert.equal(models.data[0].id,'qwen-instruct');
     assert.equal((await client.models.retrieve('qwen-instruct')).id,'qwen-instruct');
+    const uploaded=await client.files.create({file:new File(['export const answer = 42;'],'answer.ts',{type:'text/typescript'}),purpose:'user_data'});
+    assert.equal((await client.files.retrieve(uploaded.id)).filename,'answer.ts');
+    assert.equal(await (await client.files.content(uploaded.id)).text(),'export const answer = 42;');
+    assert.equal((await client.files.list({purpose:'user_data'})).data[0].id,uploaded.id);
+    const fileResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_text',text:'阅读文件'},{type:'input_file',file_id:uploaded.id}]}],store:false});
+    assert.equal(fileResponse.output_text,'你好');assert.equal((await client.files.delete(uploaded.id)).deleted,true);
     const chat=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}]});
     assert.equal(chat.choices[0].message.content,'你好');
     const completion=await client.completions.create({model:'qwen-instruct',prompt:'你'});

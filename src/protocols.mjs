@@ -54,6 +54,18 @@ function responseToolChoice(choice, tools) {
   if ([...allowed].some(name=>!available.has(name))) throw bad('allowed_tools 指定了未知工具');
   return {choice:choice.mode,tools:(tools || []).filter(tool=>allowed.has(tool.function.name))};
 }
+const agentCalls={local_shell_call:'local_shell',shell_call:'shell',apply_patch_call:'apply_patch',computer_call:'computer',program:'program'};
+const agentOutputs={local_shell_call_output:'local_shell',shell_call_output:'shell',apply_patch_call_output:'apply_patch',computer_call_output:'computer',program_output:'program'};
+function agentArguments(item){
+  if(item.type==='program')return{code:item.code,fingerprint:item.fingerprint};
+  return item.action??item.operation??item.input??{};
+}
+function agentResult(item){
+  if(item.type==='program_output')return item.result;
+  if(item.type==='computer_call_output')return item.output?.type==='computer_screenshot'?'Computer screenshot captured.':item.output;
+  if(item.output!==undefined)return item.output;
+  return item.status??'completed';
+}
 export function normalizeRequest(path, input) {
   if(path==='/v1/completions'){
     keys(input,['model','prompt','suffix','max_tokens','temperature','top_p','frequency_penalty','presence_penalty','stop','seed','stream','stream_options','n','best_of','echo','logprobs','user']);
@@ -158,7 +170,19 @@ export function normalizeRequest(path, input) {
         const previous=out.messages.at(-1);
         if (previous?.role==='assistant'&&previous.tool_calls) previous.tool_calls.push(call);
         else out.messages.push({role:'assistant',content:null,tool_calls:[call]});
+      } else if(agentCalls[item?.type]) {
+        if(typeof item.call_id!=='string'||!item.call_id)throw bad(`${item.type}.call_id 无效`);
+        const call={id:item.call_id,type:'function',function:{name:`__openai_${agentCalls[item.type]}`,arguments:JSON.stringify(agentArguments(item))}};
+        const previous=out.messages.at(-1);
+        if(previous?.role==='assistant'&&previous.tool_calls)previous.tool_calls.push(call);else out.messages.push({role:'assistant',content:null,tool_calls:[call]});
+      } else if(agentOutputs[item?.type]) {
+        if(typeof item.call_id!=='string'||!item.call_id)throw bad(`${item.type}.call_id 无效`);
+        const result=agentResult(item);out.messages.push({role:'tool',tool_call_id:item.call_id,content:typeof result==='string'?result:JSON.stringify(result)});
       } else if (item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output') out.messages.push({role:'tool',tool_call_id:item.call_id,content:text(item.output)});
+      else if(item?.type==='configuration_update'){
+        const effort=item.reasoning?.effort;if(!['low','medium','high','xhigh','max'].includes(effort))throw bad('configuration_update.reasoning.effort 无效');
+        out.messages.push({role:'system',content:`Reasoning effort is now ${effort}.`});
+      } else if(item?.type==='compaction_trigger')continue;
       else if (item && (!item.type || item.type === 'message')) out.messages.push({role:item.role,content:text(item.content)});
       else throw bad('不支持的 Responses 输入项');
     }
