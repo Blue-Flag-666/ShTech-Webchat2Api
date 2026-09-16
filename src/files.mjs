@@ -11,8 +11,24 @@ function cleanFilename(value){
   return name;
 }
 
-function textFile(file){
+async function pdfFile(file,maxPages){
+  let pdf;
+  try{
+    const {extractText,getDocumentProxy}=await import('unpdf');
+    pdf=await getDocumentProxy(Uint8Array.from(file.bytes),{maxImageSize:16_777_216});
+    if(pdf.numPages>maxPages)throw failure(400,`PDF 页数不能超过 ${maxPages}`);
+    const result=await extractText(pdf,{mergePages:true}),value=typeof result.text==='string'?result.text:result.text.join('\n\n');
+    if(!value.trim())throw failure(400,`PDF ${file.filename} 没有可提取的文本，暂不支持扫描件 OCR`);
+    return `<attached_file name=${JSON.stringify(file.filename)} media_type="application/pdf" pages=${result.totalPages}>\n${value}\n</attached_file>`;
+  }catch(error){
+    if(error?.status)throw error;
+    throw failure(400,`无法读取 PDF ${file.filename}`);
+  }finally{try{await pdf?.destroy();}catch{}}
+}
+
+async function textFile(file,maxPages){
   const mime=(file.mime||'').split(';')[0].toLowerCase(),extension=extname(file.filename).toLowerCase();
+  if(mime==='application/pdf'||extension==='.pdf')return pdfFile(file,maxPages);
   if(!(mime.startsWith('text/')||['application/json','application/jsonl','application/xml','application/yaml','application/x-yaml','application/toml','application/javascript'].includes(mime)||TEXT_EXTENSIONS.has(extension)))throw failure(400,`暂不支持读取文件类型：${mime||extension||'unknown'}`);
   let value;try{value=new TextDecoder('utf-8',{fatal:true}).decode(file.bytes);}catch{throw failure(400,`文件 ${file.filename} 不是有效 UTF-8 文本`);}
   return `<attached_file name=${JSON.stringify(file.filename)} media_type=${JSON.stringify(mime||'text/plain')}>
@@ -108,23 +124,24 @@ function storedImage(fileId,store){
   return `data:${file.mime};base64,${file.bytes.toString('base64')}`;
 }
 
-export function expandInputFiles(path,input,store){
+export async function expandInputFiles(path,input,store,{pdfMaxPages=200}={}){
+  if(!Number.isInteger(pdfMaxPages)||pdfMaxPages<1)throw new Error('PDF 页数上限必须为正整数');
   const value=structuredClone(input);
-  const convert=content=>{
+  const convert=async content=>{
     if(!Array.isArray(content))return content;
-    return content.map(part=>{
-      if(part?.type==='input_file')return{type:'input_text',text:textFile(inlineFile(part,store))};
+    return Promise.all(content.map(async part=>{
+      if(part?.type==='input_file')return{type:'input_text',text:await textFile(inlineFile(part,store),pdfMaxPages)};
       if(part?.type==='input_image'&&part.file_id!==undefined)return{...part,file_id:undefined,image_url:storedImage(part.file_id,store)};
       return part;
-    });
+    }));
   };
   if(path==='/v1/responses'&&Array.isArray(value.input))for(const item of value.input){
-    if(item&&(!item.type||item.type==='message'))item.content=convert(item.content);
-    else if(['function_call_output','custom_tool_call_output'].includes(item?.type))item.output=convert(item.output);
+    if(item&&(!item.type||item.type==='message'))item.content=await convert(item.content);
+    else if(['function_call_output','custom_tool_call_output'].includes(item?.type))item.output=await convert(item.output);
     else if(item?.type==='computer_call_output'&&item.output?.type==='computer_screenshot'&&item.output.file_id!==undefined)item.output={...item.output,file_id:undefined,image_url:storedImage(item.output.file_id,store)};
   }
-  if(path==='/v1/chat/completions'&&Array.isArray(value.messages))for(const message of value.messages)if(Array.isArray(message.content))message.content=message.content.map(part=>{
-    if(part?.type!=='file')return part;const file=part.file;if(!file||typeof file!=='object')throw failure(400,'file 内容块无效');return{type:'text',text:textFile(inlineFile({file_id:file.file_id,file_data:file.file_data,filename:file.filename},store))};
-  });
+  if(path==='/v1/chat/completions'&&Array.isArray(value.messages))for(const message of value.messages)if(Array.isArray(message.content))message.content=await Promise.all(message.content.map(async part=>{
+    if(part?.type!=='file')return part;const file=part.file;if(!file||typeof file!=='object')throw failure(400,'file 内容块无效');return{type:'text',text:await textFile(inlineFile({file_id:file.file_id,file_data:file.file_data,filename:file.filename},store),pdfMaxPages)};
+  }));
   return value;
 }

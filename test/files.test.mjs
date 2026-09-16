@@ -25,11 +25,11 @@ test('multipart 文件上传解析 OpenAI SDK 使用的字段',()=>{
   assert.equal(file.filename,'main.ts');assert.equal(file.purpose,'user_data');assert.equal(file.expiresAfter,3600000);assert.equal(file.bytes.toString(),'const x=1;');
 });
 
-test('Responses input_file 与工具文件结果转换为带文件名的文本上下文',()=>{
+test('Responses input_file 与工具文件结果转换为带文件名的文本上下文',async()=>{
   const store=new FileStore(4,3600000,1024),file=store.create({filename:'main.ts',mime:'text/typescript',bytes:Buffer.from('const answer = 42;')});
   const image=store.create({filename:'pixel.png',mime:'image/png',bytes:Buffer.from('iVBORw0KGgo=','base64'),purpose:'vision'});
   const inline=`data:text/plain;base64,${Buffer.from('build failed').toString('base64')}`;
-  const value=expandInputFiles('/v1/responses',{input:[
+  const value=await expandInputFiles('/v1/responses',{input:[
     {role:'user',content:[{type:'input_text',text:'审查代码'},{type:'input_file',file_id:file.id}]},
     {type:'function_call_output',call_id:'call_1',output:[{type:'input_file',filename:'build.log',file_data:inline}]},
     {role:'user',content:[{type:'input_image',file_id:image.id}]}
@@ -37,5 +37,5 @@ test('Responses input_file 与工具文件结果转换为带文件名的文本�
   assert.match(value.input[0].content[1].text,/main\.ts[\s\S]*answer = 42/);
   assert.match(value.input[1].output[0].text,/build\.log[\s\S]*build failed/);
   assert.match(value.input[2].content[0].image_url,/^data:image\/png;base64,/);
-  assert.throws(()=>expandInputFiles('/v1/responses',{input:[{role:'user',content:[{type:'input_file',filename:'a.pdf',file_data:'data:application\/pdf;base64,JVBERg=='}]}]},store),/不支持读取/);
+  await assert.rejects(()=>expandInputFiles('/v1/responses',{input:[{role:'user',content:[{type:'input_file',filename:'a.docx',file_data:'data:application\/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,UEsDBA=='}]}]},store),/不支持读取/);
 });

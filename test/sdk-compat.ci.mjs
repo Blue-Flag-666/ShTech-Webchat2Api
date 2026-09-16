@@ -21,6 +21,21 @@ async function fixture(run) {
   finally { server.closeAllConnections();await new Promise(resolve=>server.close(resolve)); }
 }
 
+function simplePdf(text='Hello PDF'){
+  const escaped=text.replaceAll('\\','\\\\').replaceAll('(','\\(').replaceAll(')','\\)');
+  const objects=[
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${Buffer.byteLength(`BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`)} >>\nstream\nBT /F1 12 Tf 72 720 Td (${escaped}) Tj ET\nendstream`
+  ];
+  let source='%PDF-1.4\n',offsets=[0];
+  objects.forEach((body,index)=>{offsets.push(Buffer.byteLength(source));source+=`${index+1} 0 obj\n${body}\nendobj\n`;});
+  const xref=Buffer.byteLength(source);source+=`xref\n0 ${objects.length+1}\n0000000000 65535 f \n`+offsets.slice(1).map(offset=>`${String(offset).padStart(10,'0')} 00000 n \n`).join('')+`trailer\n<< /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(source);
+}
+
 test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',async()=>{
   await fixture(async base=>{
     const client=new OpenAI({apiKey:'test',baseURL:`${base}/v1`,maxRetries:0});
@@ -32,6 +47,12 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     assert.equal((await client.files.list({purpose:'user_data'})).data[0].id,uploaded.id);
     const fileResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_text',text:'阅读文件'},{type:'input_file',file_id:uploaded.id}]}],store:false});
     assert.equal(fileResponse.output_text,'你好');assert.equal((await client.files.delete(uploaded.id)).deleted,true);
+    const bytes=Buffer.from('chunked upload'),upload=await client.uploads.create({bytes:bytes.length,filename:'chunked.txt',mime_type:'text/plain',purpose:'user_data'});
+    const first=await client.uploads.parts.create(upload.id,{data:new File([bytes.subarray(0,8)],'first.bin')});
+    const second=await client.uploads.parts.create(upload.id,{data:new File([bytes.subarray(8)],'second.bin')});
+    const completed=await client.uploads.complete(upload.id,{part_ids:[first.id,second.id]});assert.equal(completed.status,'completed');assert.equal(await (await client.files.content(completed.file.id)).text(),'chunked upload');
+    const pdf=await client.files.create({file:new File([simplePdf('PDF attachment works')],'document.pdf',{type:'application/pdf'}),purpose:'user_data'});
+    const pdfResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_file',file_id:pdf.id}]}],store:false});assert.equal(pdfResponse.output_text,'你好');
     const chat=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}]});
     assert.equal(chat.choices[0].message.content,'你好');
     const completion=await client.completions.create({model:'qwen-instruct',prompt:'你'});

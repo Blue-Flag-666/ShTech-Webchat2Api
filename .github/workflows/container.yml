@@ -138,11 +138,15 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7.0.1
       - uses: actions/download-artifact@v8
         with:
           pattern: shtech-webchat2api-*
           path: release
           merge-multiple: true
+      - run: |
+          cp THIRD_PARTY_LICENSES/Node.js.txt release/Node.js-LICENSE.txt
+          cp THIRD_PARTY_LICENSES/unpdf.txt release/unpdf-LICENSE.txt
       - run: cd release && sha256sum * > SHA256SUMS.txt
       - run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --generate-notes --title "$GITHUB_REF_NAME"
         env:

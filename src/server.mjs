@@ -11,6 +11,7 @@ import { RequestQueue } from './queue.mjs';
 import { extractImages, prepareImages } from './images.mjs';
 import { ResponseStore } from './response-store.mjs';
 import { FileStore, expandInputFiles, parseMultipart, readRawBody, uploadedFile } from './files.mjs';
+import { UploadStore, uploadPart } from './uploads.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
 const error = (status, message) => Object.assign(new Error(message), { status });
@@ -24,7 +25,7 @@ export function configuration(env = process.env) {
     concurrency:Number(env.GENAI_CONCURRENCY || 1),queueSize:Number(env.GENAI_QUEUE_SIZE || 32),queueTimeout:Number(env.GENAI_QUEUE_TIMEOUT_MS || 120000),
     requestLimit:Number(env.GENAI_REQUEST_LIMIT_MB || 144)*1024*1024,
     responseStoreSize:Number(env.GENAI_RESPONSE_STORE_SIZE || 128),responseStoreTtl:Number(env.GENAI_RESPONSE_STORE_TTL_MS || 3600000),
-    fileStoreSize:Number(env.GENAI_FILE_STORE_SIZE || 32),fileStoreTtl:Number(env.GENAI_FILE_STORE_TTL_MS || 3600000),fileMaxBytes:Number(env.GENAI_FILE_MAX_MB || 2)*1024*1024,
+    fileStoreSize:Number(env.GENAI_FILE_STORE_SIZE || 32),fileStoreTtl:Number(env.GENAI_FILE_STORE_TTL_MS || 3600000),fileMaxBytes:Number(env.GENAI_FILE_MAX_MB || 2)*1024*1024,pdfMaxPages:Number(env.GENAI_PDF_MAX_PAGES || 200),
     upstreamRetries:Number(env.GENAI_UPSTREAM_RETRIES ?? 2),corsOrigin:env.CORS_ORIGIN || '' };
 }
 
@@ -214,6 +215,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
   const compactionStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'压缩状态');
   const itemReferenceStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'响应项');
   const fileStore=new FileStore(config.fileStoreSize??32,config.fileStoreTtl??3600000,config.fileMaxBytes??2*1024*1024);
+  const uploadStore=new UploadStore(fileStore,config.fileStoreSize??32,3600000);
   const backgroundJobs=new Map();
   const backgroundStreams=new Map();
   function notifyBackground(log){log.version++;for(const notify of log.waiters)notify();log.waiters.clear();}
@@ -358,7 +360,19 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
       if (!config.key || !authorized(req, config.key, path)) throw error(401, '需要有效的本地 API Bearer 密钥');
-      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size,stored_items:itemReferenceStore.size,stored_files:fileStore.size });
+      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size,stored_items:itemReferenceStore.size,stored_files:fileStore.size,pending_uploads:uploadStore.size });
+      if(req.method==='POST'&&path==='/v1/uploads')return json(res,200,uploadStore.create(await readBody(req,config.requestLimit)));
+      const uploadMatch=/^\/v1\/uploads\/([^/]+)\/(parts|complete|cancel)$/.exec(path);
+      if(uploadMatch){
+        let uploadId;try{uploadId=decodeURIComponent(uploadMatch[1]);}catch{throw error(400,'Upload ID 编码无效');}
+        if(req.method!=='POST')throw error(405,'Upload 资源只支持 POST');
+        if(uploadMatch[2]==='parts'){
+          const parts=parseMultipart(await readRawBody(req,config.requestLimit),req.headers['content-type']);
+          return json(res,200,uploadStore.addPart(uploadId,uploadPart(parts)));
+        }
+        if(uploadMatch[2]==='complete')return json(res,200,uploadStore.complete(uploadId,await readBody(req,config.requestLimit)));
+        return json(res,200,uploadStore.cancel(uploadId));
+      }
       if(path==='/v1/files'){
         if(req.method==='POST'){
           const body=await readRawBody(req,config.requestLimit),parts=parseMultipart(body,req.headers['content-type']);
@@ -467,7 +481,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         }
         if(value.previous_response_id){const previous=responseStore.get(value.previous_response_id);history=previous.messages;value={...value,input:responseInputItems(value)};}
         value={...value,input:expandResponseState(value.input)};
-        value=expandInputFiles('/v1/responses',value,fileStore);
+        value=await expandInputFiles('/v1/responses',value,fileStore,{pdfMaxPages:config.pdfMaxPages??200});
         return json(res,200,{object:'response.input_tokens',input_tokens:estimateTokens(value)+estimateTokens(history)});
       }
       if(req.method==='POST'&&path==='/v1/responses/compact'){
@@ -497,7 +511,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         const conversation=conversationStore.get(conversationId);conversationItems=responseInputItems(rawInput);
         rawInput={...rawInput,input:[...conversation.items,...conversationItems]};
       }
-      rawInput=expandInputFiles(path,rawInput,fileStore);
+      rawInput=await expandInputFiles(path,rawInput,fileStore,{pdfMaxPages:config.pdfMaxPages??200});
       const media=extractImages(path,rawInput);
       const input = normalizeRequest(path,media.input);
       let previous;
@@ -673,6 +687,7 @@ export function startServer(config = configuration()) {
   if (!Number.isInteger(config.fileStoreSize) || config.fileStoreSize < 0 || config.fileStoreSize > 1000) throw new Error('GENAI_FILE_STORE_SIZE 必须为 0–1000 的整数');
   if (!Number.isFinite(config.fileStoreTtl) || config.fileStoreTtl < 3600000 || config.fileStoreTtl > 2592000000) throw new Error('GENAI_FILE_STORE_TTL_MS 必须为 1 小时–30 天');
   if (!Number.isInteger(config.fileMaxBytes) || config.fileMaxBytes < 1024 || config.fileMaxBytes > 20*1048576) throw new Error('GENAI_FILE_MAX_MB 必须为 0.001–20');
+  if (!Number.isInteger(config.pdfMaxPages) || config.pdfMaxPages < 1 || config.pdfMaxPages > 2000) throw new Error('GENAI_PDF_MAX_PAGES 必须为 1–2000 的整数');
   if (!Number.isInteger(config.upstreamRetries) || config.upstreamRetries < 0 || config.upstreamRetries > 5) throw new Error('GENAI_UPSTREAM_RETRIES 必须为 0–5 的整数');
   if (config.corsOrigin && config.corsOrigin!=='*') { let origin;try{origin=new URL(config.corsOrigin);}catch{throw new Error('CORS_ORIGIN 必须是完整来源或 *');}if(origin.origin!==config.corsOrigin)throw new Error('CORS_ORIGIN 只能包含协议、主机和端口'); }
   const server=createServer(config);
