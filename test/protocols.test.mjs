@@ -140,8 +140,12 @@ test('Responses reasoning 与 Anthropic thinking 转成推理强度',()=>{
 });
 test('Kimi 动态工具、Responses additional_tools 与 reasoning content 可回放',()=>{
   const tool={type:'function',function:{name:'calculate',description:'计算',parameters:{type:'object'}}};
-  const chat=normalizeRequest('/v1/chat/completions',{model:'kimi-k3',messages:[{role:'user',content:'算数'},{role:'system',tools:[tool]}]});
+  const chat=normalizeRequest('/v1/chat/completions',{model:'kimi-k3',messages:[{role:'user',content:'算数'},{role:'system',content:'',tools:[tool]}],thinking:{keep:'all',effort:'high'}});
   assert.equal(chat.tools[0].function.name,'calculate');assert.deepEqual(chat.messages[1].tools,[tool]);
+  assert.deepEqual(chat.thinking,{type:'enabled',keep:'all',effort:'high'});
+  assert.throws(()=>normalizeRequest('/v1/chat/completions',{messages:[{role:'system',content:'x',tools:[tool]},{role:'user',content:'x'}]}),/空 content/);
+  assert.throws(()=>normalizeRequest('/v1/chat/completions',{tools:[tool],messages:[{role:'system',content:'',tools:[tool]},{role:'user',content:'x'}]}),/重复定义/);
+  assert.throws(()=>normalizeRequest('/v1/chat/completions',{messages:[{role:'user',content:'x'}],thinking:{type:'enabled',keep:'none'}}),/仅支持 all/);
   const responses=normalizeRequest('/v1/responses',{model:'kimi-k3',input:[
     {type:'reasoning',content:[{type:'reasoning_text',text:'保留思路'}]},
     {type:'additional_tools',role:'developer',tools:[{type:'function',name:'calculate',parameters:{type:'object'}}]},

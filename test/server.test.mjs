@@ -123,6 +123,11 @@ test('Kimi K3 支持 max 推理、长输出、保留思考和 Partial Mode',()=>
   assert.equal(body.messages.at(-1).content,'Conclusion: ');assert.equal(body.messages.at(-1).reasoning_content,'先归纳');assert.equal('partial' in body.messages.at(-1),false);
   assert.throws(()=>upstreamBody({model:'kimi-k3',messages:[{role:'user',content:'x'}],max_completion_tokens:800001},config,catalogue),/800000/);
 });
+test('Kimi 原生 thinking 配置优先于 reasoning_effort',()=>{
+  const catalogue=[{id:'kimi-k3',upstream_id:'Kimi-k3',root_ai_type:'xinference',max_tokens:800000}];
+  const body=upstreamBody({model:'kimi-k3',messages:[{role:'user',content:'推理'}],thinking:{type:'enabled',keep:'all',effort:'low'},reasoning_effort:'max'},config,catalogue);
+  assert.match(body.chatInfo,/low reasoning effort/);assert.doesNotMatch(body.chatInfo,/max reasoning effort/);
+});
 
 test('Anthropic token 计数支持 x-api-key 且不访问上游',async()=>{
   await withServer(async()=>{throw new Error('不应访问上游');},async(call,base)=>{
@@ -276,6 +281,16 @@ test('兼容上游 reasoning 与 thinking 推理字段',async()=>{
   for(const field of ['reasoning','thinking'])await withServer(async()=>{
     const reasoning=chunk('');reasoning.choices[0].delta[field]='思考';return new Response(sse([reasoning,chunk('回答','stop')]),{headers:{'content-type':'text/event-stream'}});
   },async call=>assert.equal((await(await call()).json()).choices[0].message.reasoning_content,'思考'));
+});
+test('thinking disabled 在 JSON 和 SSE 中隐藏上游推理',async()=>{
+  await withServer(async()=>{
+    const reasoning=chunk('');reasoning.choices[0].delta.reasoning_content='内部思考';
+    return new Response(sse([reasoning,chunk('回答','stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async call=>{
+    const base={...request,thinking:{type:'disabled',keep:'none',effort:'high'}};
+    const json=await(await call(base)).json();assert.equal(json.choices[0].message.content,'回答');assert.equal(json.choices[0].message.reasoning_content,undefined);
+    const streamed=await(await call({...base,stream:true})).text();assert.match(streamed,/回答/);assert.doesNotMatch(streamed,/内部思考|reasoning_content/);
+  });
 });
 test('工具调用通过 HTTP 转换为 function call，流式也正常结束',async()=>{
   const tools=[{type:'function',function:{name:'weather',parameters:{type:'object'}}}];

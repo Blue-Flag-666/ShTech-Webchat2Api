@@ -131,7 +131,7 @@ npm start
 
 本地鉴权同时接受 `Authorization: Bearer`、`x-api-key` 和 `api-key`。
 
-三个聊天接口均支持流式与非流式文本、工具调用、推理摘要、图片输入和 JSON/JSON Schema 输出。Kimi K3 额外兼容 `reasoning_effort=max`、历史 `reasoning_content`、Partial Mode、动态工具、学校目录中的 800K 上下文限制，以及 Moonshot 的 `/v1/tokenizers/estimate-token-count` 和 `/anthropic/v1/messages` 路径。
+三个聊天接口均支持流式与非流式文本、工具调用、推理摘要、图片输入和 JSON/JSON Schema 输出。Kimi K3 额外兼容 `reasoning_effort`、原生 `thinking` 配置、历史 `reasoning_content`、Partial Mode、动态工具、学校目录中的 800K 上下文限制，以及 Moonshot 的 `/v1/tokenizers/estimate-token-count` 和 `/anthropic/v1/messages` 路径。
 
 工具由客户端执行，服务负责声明、解析、参数 Schema 校验和回传。Webchat 没有公开原生工具参数入口，因此工具及结构化输出通过提示词生成并在本地校验；上下文缓存、请求签名、Formula 工具和原生约束解码无法由该代理复刻。
 

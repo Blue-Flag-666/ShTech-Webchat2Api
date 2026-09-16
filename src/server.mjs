@@ -34,7 +34,7 @@ export function upstreamBody(input, config, supportedModels, formatPolicy=null,m
   const partial=messages.at(-1).role==='assistant'&&messages.at(-1).partial===true;
   const dynamicTail=messages.at(-1).role==='system'&&messages.at(-1).dynamic===true&&messages.some(message=>message.role==='user');
   if (messages.at(-1).role !== 'user'&&!partial&&!dynamicTail) throw error(400, '最后一条消息必须为 user、工具结果、动态工具或 partial assistant');
-  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','max_completion_tokens','chat_group_id','net_go','tools','tool_choice','response_format','parallel_tool_calls','stream_options','temperature','top_p','top_k','min_p','presence_penalty','frequency_penalty','repetition_penalty','stop','seed','n','logprobs','top_logprobs','user','service_tier','reasoning_effort','verbosity'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
+  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','max_completion_tokens','chat_group_id','net_go','tools','tool_choice','response_format','parallel_tool_calls','stream_options','temperature','top_p','top_k','min_p','presence_penalty','frequency_penalty','repetition_penalty','stop','seed','n','logprobs','top_logprobs','user','service_tier','reasoning_effort','verbosity','thinking'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
   if (input.stream !== undefined && typeof input.stream !== 'boolean') throw error(400, 'stream 必须是布尔值');
   if (input.net_go !== undefined && typeof input.net_go !== 'boolean') throw error(400, 'net_go 必须是布尔值');
   if (input.parallel_tool_calls !== undefined && typeof input.parallel_tool_calls !== 'boolean') throw error(400, 'parallel_tool_calls 必须是布尔值');
@@ -62,7 +62,7 @@ export function upstreamBody(input, config, supportedModels, formatPolicy=null,m
   if (!Number.isInteger(max) || max < 1 || max > modelLimit) throw error(400, `max_tokens 必须是 1–${modelLimit} 的整数`);
   const group = input.chat_group_id ?? config.group;
   if (typeof group !== 'string') throw error(400, 'chat_group_id 必须是字符串');
-  const requestedEffort=input.reasoning_effort??(kimiK3?'max':undefined);
+  const requestedEffort=input.thinking?.type==='disabled'?'none':input.thinking?.effort??input.reasoning_effort??(kimiK3?'max':undefined);
   const effectiveEffort=kimiK3?({none:'low',minimal:'low',medium:'high',xhigh:'max'}[requestedEffort]||requestedEffort):requestedEffort;
   const behavior=[effectiveEffort&&effectiveEffort!=='none'?`Use ${effectiveEffort} reasoning effort.`:'',input.verbosity?`Use ${input.verbosity} response verbosity.`:'',partial?'Continue from the final assistant prefix. Return only the new continuation; do not repeat the prefix.':'',dynamicTail?'Answer the most recent user request using the dynamically loaded tools when appropriate.':''].filter(Boolean).join(' ');
   const instructions=[behavior,toolPrompt(toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls)),outputPrompt(formatPolicy)].filter(Boolean).join('\n\n');
@@ -298,6 +298,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const sourceEvents=input.stream&&(policy||formatPolicy)?withHeartbeats(source):source;
       const legacyId=`cmpl-${randomUUID()}`;
       let text = '', reasoning = '', responseBytes = 0, last, finished = false, seen = false;
+      const suppressReasoning=input.thinking?.type==='disabled';
       const nativeCalls=new Map();
       for await (const item of sourceEvents) {
         if(item===null){if(!res.headersSent)res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no'});await write(res,': keep-alive\n\n');continue;}
@@ -333,9 +334,10 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         }
         if (choice) seen = true;
         const content = choice?.delta?.content || '';
-        const thought = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? choice?.delta?.thinking ?? '';
-        if (typeof thought !== 'string') throw error(502, '上游返回无效推理字段');
-        responseBytes += Buffer.byteLength(content) + Buffer.byteLength(thought);
+        const upstreamThought = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? choice?.delta?.thinking ?? '';
+        const thought=suppressReasoning?'':upstreamThought;
+        if (typeof upstreamThought !== 'string') throw error(502, '上游返回无效推理字段');
+        responseBytes += Buffer.byteLength(content) + Buffer.byteLength(upstreamThought);
         if (responseBytes > 8 * 1024 * 1024) throw error(502, '上游响应超过 8 MiB');
         if (!input.stream || policy || formatPolicy) text += content;
         if (!input.stream || policy || formatPolicy) reasoning += thought;
@@ -345,8 +347,9 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
           if (adapter) { await adapter.reasoningDelta(thought); await adapter.delta(content); }
           else {
             if (!res.headersSent) res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
+            const publicChunk=suppressReasoning?{...chunk,choices:chunk.choices.map(value=>{const delta={...value.delta};delete delta.reasoning_content;delete delta.reasoning;delete delta.thinking;return{...value,delta};})}:chunk;
             const outbound=legacy?{id:chunk.id?.replace(/^chatcmpl-/,'cmpl-')||legacyId,object:'text_completion',created:chunk.created||Math.floor(Date.now()/1000),model:input.model||chunk.model||'qwen-instruct',choices:chunk.choices.map(value=>({index:value.index,text:value.delta?.content||'',logprobs:null,finish_reason:value.finish_reason})),...(input.stream_options?.include_usage?{usage:null}:{})}
-              :input.stream_options?.include_usage?{...chunk,usage:null}:chunk;
+              :input.stream_options?.include_usage?{...publicChunk,usage:null}:publicChunk;
             await write(res, `data: ${JSON.stringify(outbound)}\n\n`);
           }
         }

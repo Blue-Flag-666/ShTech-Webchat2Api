@@ -86,7 +86,7 @@ export function normalizeMessages(messages, policy) {
     if(m.content!=null && typeof m.content!=='string') throw invalid('当前仅支持文本消息');
     if(m.reasoning_content!==undefined&&(m.role!=='assistant'||typeof m.reasoning_content!=='string'))throw invalid('reasoning_content 仅适用于 assistant 文本');
     if(m.partial!==undefined&&(m.role!=='assistant'||typeof m.partial!=='boolean'||!m.partial||index!==messages.length-1))throw invalid('partial=true 仅适用于最后一条 assistant 消息');
-    if(m.tools!==undefined&&(m.role!=='system'||!Array.isArray(m.tools)||!m.tools.length||m.content!=null))throw invalid('动态 tools 仅适用于无 content 的 system 消息');
+    if(m.tools!==undefined&&(m.role!=='system'||!Array.isArray(m.tools)||!m.tools.length||(m.content!=null&&m.content!=='')))throw invalid('动态 tools 仅适用于空 content 的 system 消息');
     let content=m.content||'';
     if(m.tools!==undefined)content=`Dynamic tool declarations:\n${JSON.stringify(m.tools.map(tool=>tool.function))}`;
     if(m.tool_calls!==undefined) {

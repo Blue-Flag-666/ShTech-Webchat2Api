@@ -74,6 +74,14 @@ export function normalizeRequest(path, input) {
   }
   if (path === '/v1/chat/completions') {
     const out={...input};
+    if(out.thinking!==undefined){
+      if(!out.thinking||typeof out.thinking!=='object'||Array.isArray(out.thinking))throw bad('thinking 必须是对象');
+      const type=out.thinking.type??'enabled';
+      if(!['enabled','disabled'].includes(type))throw bad('thinking.type 无效');
+      if(type==='enabled'&&out.thinking.keep!==undefined&&out.thinking.keep!=='all')throw bad('thinking.keep 仅支持 all');
+      if(type==='enabled'&&out.thinking.effort!==undefined&&!['low','high','max'].includes(out.thinking.effort))throw bad('thinking.effort 无效');
+      out.thinking={...out.thinking,type};
+    }
     if(out.web_search_options!==undefined){
       if(!out.web_search_options||typeof out.web_search_options!=='object'||Array.isArray(out.web_search_options))throw bad('web_search_options 必须是对象');
       out.net_go=true;delete out.web_search_options;
@@ -88,14 +96,18 @@ export function normalizeRequest(path, input) {
       out.tool_choice=typeof out.function_call==='object'?{type:'function',function:{name:out.function_call.name}}:out.function_call==='none'?'none':'auto';delete out.function_call;
     }
     if(Array.isArray(out.messages)){
-      const merged=[...(out.tools||[])],byName=new Map(merged.map(tool=>[tool?.function?.name,tool]));
+      const merged=[...(out.tools||[])],names=new Set();
+      for(const tool of merged){
+        const name=tool?.function?.name;
+        if(typeof name==='string'&&names.has(name))throw bad(`工具 ${name} 重复定义`);
+        if(typeof name==='string')names.add(name);
+      }
       for(const message of out.messages)if(message?.tools!==undefined){
-        if(message.role!=='system'||message.content!=null||!Array.isArray(message.tools)||!message.tools.length)throw bad('动态 tools 仅适用于无 content 的 system 消息');
+        if(message.role!=='system'||(message.content!=null&&message.content!=='')||!Array.isArray(message.tools)||!message.tools.length)throw bad('动态 tools 仅适用于空 content 的 system 消息');
         for(const tool of message.tools){
           if(tool?.type!=='function'||typeof tool.function?.name!=='string')throw bad('动态工具必须是 function');
-          const previous=byName.get(tool.function.name);
-          if(previous&&JSON.stringify(previous)!==JSON.stringify(tool))throw bad(`工具 ${tool.function.name} 重复定义`);
-          if(!previous){merged.push(tool);byName.set(tool.function.name,tool);}
+          if(names.has(tool.function.name))throw bad(`工具 ${tool.function.name} 重复定义`);
+          merged.push(tool);names.add(tool.function.name);
         }
       }
       if(merged.length)out.tools=merged;
