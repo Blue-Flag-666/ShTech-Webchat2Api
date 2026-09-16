@@ -37,5 +37,4 @@ test('Responses input_file 与工具文件结果转换为带文件名的文本�
   assert.match(value.input[0].content[1].text,/main\.ts[\s\S]*answer = 42/);
   assert.match(value.input[1].output[0].text,/build\.log[\s\S]*build failed/);
   assert.match(value.input[2].content[0].image_url,/^data:image\/png;base64,/);
-  await assert.rejects(()=>expandInputFiles('/v1/responses',{input:[{role:'user',content:[{type:'input_file',filename:'a.docx',file_data:'data:application\/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,UEsDBA=='}]}]},store),/不支持读取/);
 });

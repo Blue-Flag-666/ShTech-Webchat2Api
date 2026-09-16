@@ -147,6 +147,7 @@ jobs:
       - run: |
           cp THIRD_PARTY_LICENSES/Node.js.txt release/Node.js-LICENSE.txt
           cp THIRD_PARTY_LICENSES/unpdf.txt release/unpdf-LICENSE.txt
+          cp THIRD_PARTY_LICENSES/fflate.txt release/fflate-LICENSE.txt
       - run: cd release && sha256sum * > SHA256SUMS.txt
       - run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --generate-notes --title "$GITHUB_REF_NAME"
         env:

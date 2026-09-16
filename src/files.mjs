@@ -1,10 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
+import { extractOfficeText } from './office.mjs';
 
 const failure=(status,message)=>Object.assign(new Error(message),{status});
 const TEXT_EXTENSIONS=new Set(['.txt','.md','.markdown','.json','.jsonl','.csv','.tsv','.xml','.html','.htm','.css','.scss','.less','.js','.mjs','.cjs','.jsx','.ts','.tsx','.py','.java','.c','.h','.cc','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.sh','.bash','.zsh','.fish','.ps1','.yaml','.yml','.toml','.ini','.conf','.cfg','.env','.sql','.graphql','.gql','.log','.diff','.patch','.vue','.svelte','.tex','.rst']);
 const FILE_PURPOSES=new Set(['assistants','batch','fine-tune','vision','user_data','evals']);
 const INTERNAL_FILE_PURPOSES=new Set(['assistants_output','batch_output','fine-tune-results']);
+const OFFICE_TYPES=new Map([
+  ['.docx','docx'],['application/vnd.openxmlformats-officedocument.wordprocessingml.document','docx'],
+  ['.pptx','pptx'],['application/vnd.openxmlformats-officedocument.presentationml.presentation','pptx'],
+  ['.xlsx','xlsx'],['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','xlsx']
+]);
 
 function cleanFilename(value){
   if(typeof value!=='string'||!value.trim())throw failure(400,'文件名不能为空');
@@ -31,6 +37,7 @@ async function pdfText(file,maxPages){
 export async function extractFileText(file,maxPages=200){
   const mime=(file.mime||'').split(';')[0].toLowerCase(),extension=extname(file.filename).toLowerCase();
   if(mime==='application/pdf'||extension==='.pdf')return pdfText(file,maxPages);
+  const office=OFFICE_TYPES.get(mime)||OFFICE_TYPES.get(extension);if(office)return extractOfficeText(file,office);
   if(!(mime.startsWith('text/')||['application/json','application/jsonl','application/xml','application/yaml','application/x-yaml','application/toml','application/javascript'].includes(mime)||TEXT_EXTENSIONS.has(extension)))throw failure(400,`暂不支持读取文件类型：${mime||extension||'unknown'}`);
   let value;try{value=new TextDecoder('utf-8',{fatal:true}).decode(file.bytes);}catch{throw failure(400,`文件 ${file.filename} 不是有效 UTF-8 文本`);}
   return {text:value,mime:mime||'text/plain'};

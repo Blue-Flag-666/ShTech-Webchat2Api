@@ -4,6 +4,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { generateText, jsonSchema, stepCountIs, streamText, tool } from 'ai';
+import { strToU8, zipSync } from 'fflate';
 import { createServer } from '../src/server.mjs';
 import { listenForFetch, confirmedModels } from './fixtures.mjs';
 
@@ -36,6 +37,13 @@ function simplePdf(text='Hello PDF'){
   return Buffer.from(source);
 }
 
+function simpleDocx(text='Office attachment works'){
+  return Buffer.from(zipSync({
+    '[Content_Types].xml':strToU8('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'),
+    'word/document.xml':strToU8(`<w:document xmlns:w="urn:w"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`)
+  }));
+}
+
 test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',async()=>{
   await fixture(async base=>{
     const client=new OpenAI({apiKey:'test',baseURL:`${base}/v1`,maxRetries:0});
@@ -53,6 +61,8 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     const completed=await client.uploads.complete(upload.id,{part_ids:[first.id,second.id]});assert.equal(completed.status,'completed');assert.equal(await (await client.files.content(completed.file.id)).text(),'chunked upload');
     const pdf=await client.files.create({file:new File([simplePdf('PDF attachment works')],'document.pdf',{type:'application/pdf'}),purpose:'user_data'});
     const pdfResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_file',file_id:pdf.id}]}],store:false});assert.equal(pdfResponse.output_text,'你好');
+    const office=await client.files.create({file:new File([simpleDocx()],'report.docx',{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}),purpose:'user_data'});
+    const officeResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_file',file_id:office.id}]}],store:false});assert.equal(officeResponse.output_text,'你好');
     const knowledge=await client.files.create({file:new File(['Production deployment uses blue-green releases.'],'runbook.md',{type:'text/markdown'}),purpose:'assistants'});
     const vectorStore=await client.vectorStores.create({name:'SDK knowledge',file_ids:[knowledge.id]});assert.equal(vectorStore.file_counts.completed,1);
     assert.equal((await client.vectorStores.retrieve(vectorStore.id)).id,vectorStore.id);assert.equal((await client.vectorStores.list({limit:1})).data[0].id,vectorStore.id);

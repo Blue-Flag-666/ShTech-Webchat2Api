@@ -1,6 +1,6 @@
 {
   "name": "shanghaitech-webchat-api",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -21,6 +21,7 @@
     "openai": "^7.15.0"
   },
   "dependencies": {
+    "fflate": "0.8.3",
     "unpdf": "1.8.1"
   }
 }

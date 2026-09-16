@@ -16,6 +16,7 @@ RUN apk add --no-cache ca-certificates libstdc++ \
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY THIRD_PARTY_LICENSES/Node.js.txt /usr/share/licenses/nodejs/LICENSE
 COPY THIRD_PARTY_LICENSES/unpdf.txt /usr/share/licenses/unpdf/LICENSE
+COPY THIRD_PARTY_LICENSES/fflate.txt /usr/share/licenses/fflate/LICENSE
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
