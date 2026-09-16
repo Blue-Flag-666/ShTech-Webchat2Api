@@ -2,8 +2,12 @@
 *
 !Dockerfile
 !package.json
+!package-lock.json
 !THIRD_PARTY_LICENSES/
 !THIRD_PARTY_LICENSES/Node.js.txt
+!THIRD_PARTY_LICENSES/unpdf.txt
 !src/
 !src/*.mjs
+!scripts/
+!scripts/build-server.mjs
 !.env.example
