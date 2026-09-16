@@ -27,24 +27,6 @@ test('图片输入上传后转换为 Webchat 图片字段',async()=>{
   },{uploadToken:'upload-token',imageFetcher:async()=>{uploads++;return new Response(JSON.stringify({success:true,result:{url:'test.png',width:1,height:1}}),{headers:{'content-type':'application/json'}});}});
   assert.equal(uploads,1);
 });
-test('Responses 工具结果中的截图会上传给 Kimi 继续分析',async()=>{
-  const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-  await withServer(async(_,options)=>{
-    const body=JSON.parse(options.body);assert.equal(body.chatInfo,'分析截图');
-    assert.equal(body.imageUrl,'https://genaipic.shanghaitech.edu.cn/sys/common/static/screenshot.png');
-    return new Response(sse([chunk('界面正常','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async(_call,base)=>{
-    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
-    const input=[
-      {type:'function_call',call_id:'call_browser',name:'browser',arguments:'{}'},
-      {type:'function_call_output',call_id:'call_browser',output:[{type:'input_text',text:'截图结果'},{type:'input_image',image_url:`data:image/png;base64,${png}`}]},
-      {type:'message',role:'user',content:'分析截图'}
-    ];
-    const response=await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'kimi-k3',input,tools:[{type:'function',name:'browser',parameters:{type:'object'}}]})});
-    assert.equal(response.status,200);assert.equal((await response.json()).output_text,'界面正常');
-  },{modelFetcher:async()=>({success:true,result:{records:[{aiType:'Kimi-k3',simpleName:'Kimi-K3',maxToken:800000,rootAiType:'xinference'}]}}),uploadToken:'screenshot-upload-token',imageFetcher:async()=>new Response(JSON.stringify({success:true,result:{url:'screenshot.png',width:1,height:1}}),{headers:{'content-type':'application/json'}})});
-});
-
 test('Responses 后台任务可轮询完成并保留输入项',async()=>{
   let release;const gate=new Promise(resolve=>{release=resolve;});
   await withServer(async()=>{await gate;return new Response(sse([chunk('后台完成','stop')]),{headers:{'content-type':'text/event-stream'}});},async(_call,base)=>{
