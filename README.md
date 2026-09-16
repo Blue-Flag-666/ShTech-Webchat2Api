@@ -136,6 +136,26 @@ npm start
 
 本地鉴权同时接受 `Authorization: Bearer`、`x-api-key` 和 `api-key`。
 
+### 与普通 API 提供商的协议差异
+
+这里的“普通 API 提供商”指直接提供模型推理接口、兼容 OpenAI 或 Anthropic 协议的云服务。各家实际支持范围不同；下表以完整的 OpenAI Chat Completions、Responses 和 Anthropic Messages 服务为对照。本项目首先保证 OpenCode 等代码 Agent 所需的常用调用能够工作，不代表完整复刻任一云平台。
+
+| 对比项 | 本项目 | 普通 API 提供商 |
+|---|---|---|
+| 请求路径 | 同时提供 Chat Completions、Responses、传统 Completions 和 Anthropic Messages 常用接口 | 通常提供其中一种或多种原生接口，支持范围由提供商决定 |
+| 模型与鉴权 | 本地 API Key 验证客户端，再通过 CAS 或网页 token 访问学校 Webchat；模型来自学校 Xinference 目录 | 客户端直接使用提供商签发的 API Key，请求直接进入模型服务 |
+| 流式响应 | 将学校 EventStream 转换成 OpenAI SSE 或 Anthropic SSE，并生成对应的结束事件 | 由推理后端直接生成协议事件，字段和时序通常更完整 |
+| 工具调用 | 支持 function、custom、namespace 和 Anthropic tool；模型通过提示词产生调用，本地解析并校验参数，工具仍由客户端执行 | function calling 通常由模型原生输出；部分平台还会在服务端执行搜索、代码解释器、MCP 等内置工具 |
+| 结构化输出 | 支持 JSON Object 和 JSON Schema，但依赖提示词生成与本地校验 | 支持时通常使用模型原生约束解码，格式保证更强 |
+| 联网搜索 | 将 Chat、Responses 和 Anthropic 搜索请求映射到 Webchat 的 `netGo`；不伪造原生搜索调用、步骤或引用事件 | 支持时可返回完整工具调用生命周期、来源和引用信息 |
+| 多轮状态 | 支持 `previous_response_id`、Conversations、后台任务、取消和流式续传；默认只在本进程内保存一小时 | 通常由云端持久化，并按平台的数据保留策略跨进程提供 |
+| 文件能力 | 兼容 Files 和分片 Uploads；文件默认保存在内存中，文本、代码和带文本层 PDF 会转换为模型上下文 | 通常使用持久对象存储，还可能提供原生文件搜索、向量库、批处理和微调 |
+| Token 与缓存 | 提供兼容的 token 估算和 usage 字段，无法取得 Kimi K3 的精确内部 tokenizer、缓存命中与计费信息 | 由原生 tokenizer 和计费系统返回精确用量及缓存数据 |
+| 并发与可靠性 | 受学校 Webchat 能力限制，默认单并发排队，并在流开始前有限重试 | 通常提供明确的 RPM/TPM 配额、弹性并发和服务等级 |
+| 尚未覆盖 | Realtime、Batches、embeddings、reranker、向量库、微调、音频、视频及原生服务端工具 | 是否支持取决于提供商；完整平台通常覆盖其中更多资源 |
+
+因此，本项目可作为常用 SDK 和代码 Agent 的兼容接入层，尤其适合使用学校 Kimi K3 完成文本、图片、工具调用和长上下文开发任务。依赖精确计费、持久云端状态、原生内置工具或未列出的资源接口时，不能视为普通云 API 的无差别替代品。
+
 三个聊天接口均支持流式与非流式文本、工具调用、推理摘要、图片输入和 JSON/JSON Schema 输出。Kimi K3 额外兼容 `reasoning_effort`、原生 `thinking` 配置、历史 `reasoning_content`、Partial Mode、动态工具、学校目录中的 800K 上下文限制，以及 Moonshot 的 `/v1/tokenizers/estimate-token-count` 和 `/anthropic/v1/messages` 路径。
 
 工具由客户端执行，服务负责声明、解析、参数 Schema 校验和回传。Webchat 没有公开原生工具参数入口，因此工具及结构化输出通过提示词生成并在本地校验；上下文缓存、请求签名、Formula 工具和原生约束解码无法由该代理复刻。
