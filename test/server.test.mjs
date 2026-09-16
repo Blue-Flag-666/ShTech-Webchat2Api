@@ -42,12 +42,34 @@ test('Responses 后台任务可轮询完成并保留输入项',async()=>{
   });
 });
 
+test('Responses 后台流可在断开后按序号续传',async()=>{
+  await withServer(async()=>new Response(sse([chunk('后台'),chunk('续传','stop'),'[DONE]']),{headers:{'content-type':'text/event-stream'}}),async(_call,base)=>{
+    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
+    const response=await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',input:'长任务',background:true,stream:true})});
+    assert.match(response.headers.get('content-type'),/text\/event-stream/);
+    const iterator=events(response.body)[Symbol.asyncIterator](),received=[];
+    received.push((await iterator.next()).value,(await iterator.next()).value);
+    await iterator.return();
+    const first=received.map(item=>JSON.parse(item.data));
+    assert.equal(received[0].event,'response.queued');assert.equal(first[0].sequence_number,0);
+    const after=first.at(-1).sequence_number;
+    const resumed=await fetch(`${base}/v1/responses/${first[0].response.id}?stream=true&starting_after=${after}`,{headers});
+    const rest=await Array.fromAsync(events(resumed.body)),values=rest.map(item=>JSON.parse(item.data));
+    assert.ok(values.length);assert.ok(values.every(value=>value.sequence_number>after));
+    assert.deepEqual(values.map(value=>value.sequence_number),values.map(value=>value.sequence_number).toSorted((a,b)=>a-b));
+    assert.equal(rest.at(-1).event,'response.completed');assert.equal(values.at(-1).response.id,first[0].response.id);
+    assert.equal(values.at(-1).response.output_text,'后台续传');assert.equal(values.at(-1).response.background,true);
+    assert.equal((await fetch(`${base}/v1/responses/${first[0].response.id}?stream=true&starting_after=nope`,{headers})).status,400);
+  });
+});
+
 test('Responses 后台任务可以取消和删除',async()=>{
   await withServer(async(_url,options)=>new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason||new Error('aborted')),{once:true})),async(_call,base)=>{
     const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
     const created=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',input:'等待',background:true})})).json();
     const cancelled=await(await fetch(`${base}/v1/responses/${created.id}/cancel`,{method:'POST',headers})).json();assert.equal(cancelled.status,'cancelled');
     const stored=await(await fetch(`${base}/v1/responses/${created.id}`,{headers})).json();assert.equal(stored.status,'cancelled');
+    const frames=await Array.fromAsync(events((await fetch(`${base}/v1/responses/${created.id}?stream=true`,{headers})).body));assert.equal(frames.at(-1).event,'response.cancelled');
     assert.equal((await fetch(`${base}/v1/responses/${created.id}`,{method:'DELETE',headers})).status,200);
     assert.equal((await fetch(`${base}/v1/responses/${created.id}`,{headers})).status,404);
   });

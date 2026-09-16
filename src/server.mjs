@@ -208,6 +208,38 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
   const queue=new RequestQueue(config.concurrency??1,config.queueSize??32,config.queueTimeout??120000);
   const responseStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000);
   const backgroundJobs=new Map();
+  const backgroundStreams=new Map();
+  function notifyBackground(log){log.version++;for(const notify of log.waiters)notify();log.waiters.clear();}
+  function closeBackground(log){if(!log.done){log.done=true;notifyBackground(log);}}
+  function pruneBackground(){
+    const now=Date.now();
+    for(const [id,log] of backgroundStreams)if(log.expires<=now){closeBackground(log);backgroundStreams.delete(id);}
+    while(backgroundStreams.size>(config.responseStoreSize??128)){const id=backgroundStreams.keys().next().value,log=backgroundStreams.get(id);closeBackground(log);backgroundStreams.delete(id);}
+  }
+  function addBackgroundEvent(log,type,value){
+    if(log.done)return;
+    const sequence=log.nextSequence++,data={...value,type,sequence_number:sequence};
+    log.events.push({sequence,frame:`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`});
+    log.expires=Date.now()+(config.responseStoreTtl??3600000);
+    notifyBackground(log);
+    return data;
+  }
+  function backgroundResponse(value,id,store){return {...value,id,background:true,store};}
+  async function streamBackground(req,res,log,startingAfter=-1){
+    res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
+    let cursor=startingAfter,closed=false;
+    const close=()=>{closed=true;for(const notify of log.waiters)notify();};
+    res.once('close',close);
+    try{
+      while(!closed){
+        for(const item of log.events)if(item.sequence>cursor){await write(res,item.frame);cursor=item.sequence;}
+        if(log.done)break;
+        const version=log.version;
+        await new Promise(resolve=>{const wake=()=>{log.waiters.delete(wake);resolve();};log.waiters.add(wake);if(closed||log.done||log.version!==version)wake();});
+      }
+      if(!closed&&!res.writableEnded)res.end();
+    }finally{res.off('close',close);}
+  }
   let modelCache = { at: 0, data: [] };
   let modelRetryAfter = 0;
   let modelPending;
@@ -237,24 +269,43 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const current=responseStore.get(id);current.response={...current.response,status:'in_progress'};responseStore.set(id,current);
       const address=server.address();if(!address||typeof address!=='object')throw new Error('本地服务尚未监听');
       const host=address.family==='IPv6'?'[::1]':'127.0.0.1';
-      const response=await fetch(`http://${host}:${address.port}/v1/responses`,{method:'POST',headers:{Authorization:`Bearer ${config.key}`,'Content-Type':'application/json'},body:JSON.stringify({...raw,background:false,stream:false,store:false}),signal:job.controller.signal});
-      const value=await response.json();
-      if(!response.ok)throw new Error(value?.error?.message||`后台请求 HTTP ${response.status}`);
+      const response=await fetch(`http://${host}:${address.port}/v1/responses`,{method:'POST',headers:{Authorization:`Bearer ${config.key}`,'Content-Type':'application/json','Accept':'text/event-stream'},body:JSON.stringify({...raw,background:false,stream:true,store:false}),signal:job.controller.signal});
+      if(!response.ok){const value=await response.json().catch(()=>null);throw new Error(value?.error?.message||`后台请求 HTTP ${response.status}`);}
+      if(!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream'))throw new Error('后台请求没有返回 SSE');
+      let terminal;
+      for await(const item of events(response.body)){
+        let value;try{value=JSON.parse(item.data);}catch{throw new Error('后台请求返回无效 SSE JSON');}
+        if(item.event==='error'||value?.type==='error')throw new Error(value?.message||'后台请求返回错误事件');
+        if(!item.event.startsWith('response.'))continue;
+        if(value.response)value={...value,response:backgroundResponse(value.response,id,job.store)};
+        value={...value,sequence_number:(Number.isInteger(value.sequence_number)?value.sequence_number:job.log.nextSequence-1)+1};
+        const emitted=addBackgroundEvent(job.log,item.event,value);
+        if(emitted?.response){
+          const stored=responseStore.get(id);
+          stored.response=emitted.response;
+          if(['response.completed','response.incomplete'].includes(item.event)){
+            terminal=emitted.response;stored.messages=[...job.messages,responseAssistant(terminal)];
+          }
+          responseStore.set(id,stored);
+        }
+      }
       job.controller.signal.throwIfAborted();
-      responseStore.set(id,{response:{...value,id,background:true,store:job.store},messages:[...job.messages,responseAssistant(value)],input_items:job.inputItems});
+      if(!terminal)throw new Error('后台流意外结束，未收到终止事件');
+      job.terminal=true;closeBackground(job.log);
     }catch(cause){
-      if(job.deleted)return;
+      if(job.deleted||job.terminal)return;
       try{
         const stored=responseStore.get(id),cancelled=job.controller.signal.aborted;
         stored.response={...stored.response,status:cancelled?'cancelled':'failed',completed_at:null,error:cancelled?null:{code:'server_error',message:cause?.message||'后台请求失败'}};
         responseStore.set(id,stored);
+        addBackgroundEvent(job.log,cancelled?'response.cancelled':'response.failed',{response:stored.response});closeBackground(job.log);job.terminal=true;
       }catch{}
     }finally{if(backgroundJobs.get(id)===job)backgroundJobs.delete(id);}
   }
   server=http.createServer(async (req, res) => {
-    let controller, timer, release, path=req.url;
+    let controller, timer, release, path=req.url,requestUrl;
     try {
-      path=new URL(req.url,'http://localhost').pathname;
+      requestUrl=new URL(req.url,'http://localhost');path=requestUrl.pathname;
       if(path==='/anthropic/v1/messages')path='/v1/messages';
       if(path==='/anthropic/v1/messages/count_tokens')path='/v1/messages/count_tokens';
       const origin=req.headers.origin,allowed=config.corsOrigin==='*'||config.corsOrigin&&origin===config.corsOrigin;
@@ -273,15 +324,26 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
           const stored=responseStore.get(responseId);
           if(storedMatch[2]==='/input_items')return json(res,200,{object:'list',data:stored.input_items,first_id:stored.input_items[0]?.id??null,last_id:stored.input_items.at(-1)?.id??null,has_more:false});
           if(storedMatch[2])throw error(405,'该响应资源不支持此方法');
+          const stream=requestUrl.searchParams.get('stream');
+          if([...requestUrl.searchParams.keys()].some(key=>!['stream','starting_after'].includes(key)))throw error(400,'响应读取包含不支持的查询参数');
+          if(stream!==null&&!['true','false'].includes(stream))throw error(400,'stream 必须为 true 或 false');
+          if(stream==='true'){
+            const raw=requestUrl.searchParams.get('starting_after'),startingAfter=raw===null?-1:Number(raw);
+            if(raw!==null&&(!Number.isInteger(startingAfter)||startingAfter<0))throw error(400,'starting_after 必须是非负整数');
+            pruneBackground();const log=backgroundStreams.get(responseId);if(!log)throw error(404,`响应事件流不存在或已过期：${responseId}`);
+            return streamBackground(req,res,log,startingAfter);
+          }
+          if(requestUrl.searchParams.has('starting_after'))throw error(400,'starting_after 仅能与 stream=true 一起使用');
           return json(res,200,stored.response);
         }
         if(req.method==='POST'&&storedMatch[2]==='/cancel'){
           const stored=responseStore.get(responseId),job=backgroundJobs.get(responseId);
           if(!job||!['queued','in_progress'].includes(stored.response.status))throw error(400,'只有运行中的后台响应可以取消');
-          job.controller.abort();stored.response={...stored.response,status:'cancelled',completed_at:null,error:null};responseStore.set(responseId,stored);
+          job.terminal=true;job.controller.abort();stored.response={...stored.response,status:'cancelled',completed_at:null,error:null};responseStore.set(responseId,stored);
+          addBackgroundEvent(job.log,'response.cancelled',{response:stored.response});closeBackground(job.log);
           return json(res,200,stored.response);
         }
-        if(req.method==='DELETE'&&!storedMatch[2]){const job=backgroundJobs.get(responseId);if(job){job.deleted=true;job.controller.abort();backgroundJobs.delete(responseId);}responseStore.delete(responseId);return json(res,200,{id:responseId,object:'response.deleted',deleted:true});}
+        if(req.method==='DELETE'&&!storedMatch[2]){const job=backgroundJobs.get(responseId);if(job){job.deleted=true;job.controller.abort();backgroundJobs.delete(responseId);}const log=backgroundStreams.get(responseId);if(log){closeBackground(log);backgroundStreams.delete(responseId);}responseStore.delete(responseId);return json(res,200,{id:responseId,object:'response.deleted',deleted:true});}
         throw error(405,'该响应资源不支持此方法');
       }
       const publicModel=model=>Object.fromEntries(Object.entries(model).filter(([key])=>key!=='upstream_id'));
@@ -324,9 +386,13 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       if(media.images.length&&!selected.capabilities?.vision)throw error(400,`模型 ${selected.id} 未确认支持图片输入`);
       if(path==='/v1/responses'&&media.input.background===true){
         if(!(config.responseStoreSize??128))throw error(400,'background 模式需要启用响应存储');
-        const backgroundRaw={...rawInput},queued=adapter.response([],'queued',null),inputItems=responseInputItems(backgroundRaw),job={controller:new AbortController(),deleted:false,messages:structuredClone(input.messages),inputItems,store:media.input.store===true};
+        pruneBackground();
+        const backgroundRaw={...rawInput},queued=adapter.response([],'queued',null),inputItems=responseInputItems(backgroundRaw),log={events:[],waiters:new Set(),done:false,version:0,nextSequence:0,expires:Date.now()+(config.responseStoreTtl??3600000)},job={controller:new AbortController(),deleted:false,terminal:false,messages:structuredClone(input.messages),inputItems,store:media.input.store===true,log};
+        addBackgroundEvent(log,'response.queued',{response:queued});backgroundStreams.set(queued.id,log);pruneBackground();
         responseStore.set(queued.id,{response:queued,messages:job.messages,input_items:inputItems});backgroundJobs.set(queued.id,job);
-        setImmediate(()=>void runBackground(queued.id,backgroundRaw,job));return json(res,200,queued);
+        setImmediate(()=>void runBackground(queued.id,backgroundRaw,job));
+        if(media.input.stream===true)return streamBackground(req,res,log,-1);
+        return json(res,200,queued);
       }
       controller = new AbortController();
       res.on('close', () => {if(!res.writableEnded)controller.abort();});

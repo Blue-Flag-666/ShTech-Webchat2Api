@@ -126,9 +126,9 @@ test('接受本地 Responses 状态参数并拒绝无效内容能力',()=>{
   assert.equal(anthropic.temperature,1);assert.deepEqual(anthropic.stop,['END']);
 });
 
-test('Responses background 参数拒绝流式和禁用存储',()=>{
+test('Responses background 参数接受流式和禁用存储',()=>{
   assert.equal(normalizeRequest('/v1/responses',{input:'x',background:true}).messages[0].content,'x');
-  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',background:true,stream:true}),/stream/);
+  assert.equal(normalizeRequest('/v1/responses',{input:'x',background:true,stream:true}).stream,true);
   assert.equal(normalizeRequest('/v1/responses',{input:'x',background:true,store:false}).messages[0].content,'x');
   assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',background:'yes'}),/布尔值/);
 });

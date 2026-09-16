@@ -127,7 +127,6 @@ export function normalizeRequest(path, input) {
     keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning','text','parallel_tool_calls','include','temperature','top_p','service_tier','safety_identifier','prompt_cache_key','user','background']);
     if (input.store !== undefined && typeof input.store !== 'boolean') throw bad('store 必须为布尔值');
     if(input.background!==undefined&&typeof input.background!=='boolean')throw bad('background 必须为布尔值');
-    if(input.background===true&&input.stream===true)throw bad('background 模式不支持 stream=true');
     if (input.previous_response_id !== undefined && (typeof input.previous_response_id!=='string'||!input.previous_response_id)) throw bad('previous_response_id 必须是非空字符串');
     if (input.instructions != null) out.messages.push({role:'system',content:text(input.instructions)});
     const items = typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
