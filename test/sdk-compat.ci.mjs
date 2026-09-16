@@ -35,6 +35,11 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     assert.equal(chatText,'你好');assert.equal(usage.total_tokens,3);
     const response=await client.responses.create({model:'qwen-instruct',input:'你好',store:false});
     assert.equal(response.output[0].content[0].text,'你好');
+    const conversation=await client.conversations.create({metadata:{project:'sdk'},items:[{type:'message',role:'user',content:'旧问题'}]});
+    const continued=await client.responses.create({model:'qwen-instruct',conversation:conversation.id,input:'继续'});
+    assert.equal(continued.conversation.id,conversation.id);
+    const conversationItems=await client.conversations.items.list(conversation.id,{order:'asc'});assert.equal(conversationItems.data.length,3);
+    assert.equal((await client.conversations.delete(conversation.id)).deleted,true);
     const responseStream=await client.responses.create({model:'qwen-instruct',input:'你好',store:false,stream:true});
     let responseText='';for await(const event of responseStream)if(event.type==='response.output_text.delta')responseText+=event.delta;
     assert.equal(responseText,'你好');

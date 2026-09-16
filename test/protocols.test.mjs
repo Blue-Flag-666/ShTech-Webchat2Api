@@ -120,6 +120,7 @@ test('截断流不会产生协议成功结束事件，长度截断标记 incompl
 test('接受本地 Responses 状态参数并拒绝无效内容能力',()=>{
   assert.equal(normalizeRequest('/v1/responses',{input:'x',store:true}).messages[0].content,'x');
   assert.equal(normalizeRequest('/v1/responses',{input:'x',previous_response_id:'resp_x'}).messages[0].content,'x');
+  assert.equal(normalizeRequest('/v1/responses',{input:'x',conversation:'conv_x'}).messages[0].content,'x');
   assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',previous_response_id:''}),/非空字符串/);
   assert.throws(()=>normalizeRequest('/v1/responses',{input:[{role:'user',content:[{type:'input_image',image_url:'https://example.com'}]}]}),/内容块/);
   const anthropic=normalizeRequest('/v1/messages',{messages:[],max_tokens:1,temperature:1,top_p:.8,top_k:20,stop_sequences:['END']});

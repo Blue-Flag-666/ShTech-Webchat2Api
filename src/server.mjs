@@ -123,6 +123,7 @@ function chatUsage(value,promptEstimate,completionEstimate) {
   return {...(value || {}),prompt_tokens,completion_tokens,total_tokens};
 }
 function responseInputItems(input) {
+  if(input.input===undefined)return [];
   return Array.isArray(input.input)?structuredClone(input.input).map(item=>item&&typeof item==='object'&&!Array.isArray(item)?{...item,id:item.id||`item_${randomUUID().replaceAll('-','')}`}:{id:`item_${randomUUID().replaceAll('-','')}`,type:'input_text',text:String(item)})
     :[{id:`msg_${randomUUID().replaceAll('-','')}`,type:'message',role:'user',content:[{type:'input_text',text:input.input}]}];
 }
@@ -207,6 +208,7 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2) {
 export function createServer(config = configuration(), fetcher = upstreamFetch, modelFetcher = fetchModelList, tokenManager = new TokenManager(config), imageFetcher=fetch, frontendFetcher) {
   const queue=new RequestQueue(config.concurrency??1,config.queueSize??32,config.queueTimeout??120000);
   const responseStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000);
+  const conversationStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'对话');
   const backgroundJobs=new Map();
   const backgroundStreams=new Map();
   function notifyBackground(log){log.version++;for(const notify of log.waiters)notify();log.waiters.clear();}
@@ -224,7 +226,16 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     notifyBackground(log);
     return data;
   }
-  function backgroundResponse(value,id,store){return {...value,id,background:true,store};}
+  function backgroundResponse(value,id,store,conversationId){return {...value,id,background:true,store,conversation:conversationId?{id:conversationId}:null};}
+  function metadata(value={}){
+    if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length>16)throw error(400,'metadata 必须是最多 16 项的对象');
+    for(const [key,item] of Object.entries(value))if(key.length>64||typeof item!=='string'||item.length>512)throw error(400,'metadata 键最多 64 字符，值必须是最多 512 字符的字符串');
+    return structuredClone(value);
+  }
+  const conversationObject=value=>({id:value.id,object:'conversation',created_at:value.created_at,metadata:value.metadata});
+  function appendConversation(id,items){
+    if(!id)return;const value=conversationStore.get(id);value.items.push(...structuredClone(items));conversationStore.set(id,value);
+  }
   async function streamBackground(req,res,log,startingAfter=-1){
     res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
     let cursor=startingAfter,closed=false;
@@ -277,7 +288,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         let value;try{value=JSON.parse(item.data);}catch{throw new Error('后台请求返回无效 SSE JSON');}
         if(item.event==='error'||value?.type==='error')throw new Error(value?.message||'后台请求返回错误事件');
         if(!item.event.startsWith('response.'))continue;
-        if(value.response)value={...value,response:backgroundResponse(value.response,id,job.store)};
+        if(value.response)value={...value,response:backgroundResponse(value.response,id,job.store,job.conversationId)};
         value={...value,sequence_number:(Number.isInteger(value.sequence_number)?value.sequence_number:job.log.nextSequence-1)+1};
         const emitted=addBackgroundEvent(job.log,item.event,value);
         if(emitted?.response){
@@ -285,6 +296,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
           stored.response=emitted.response;
           if(['response.completed','response.incomplete'].includes(item.event)){
             terminal=emitted.response;stored.messages=[...job.messages,responseAssistant(terminal)];
+            appendConversation(job.conversationId,[...job.conversationItems,...terminal.output]);
           }
           responseStore.set(id,stored);
         }
@@ -316,7 +328,38 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
       if (!config.key || !authorized(req, config.key, path)) throw error(401, '需要有效的本地 API Bearer 密钥');
-      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size });
+      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size });
+      if(req.method==='POST'&&path==='/v1/conversations'){
+        if(!(config.responseStoreSize??128))throw error(400,'Conversations 需要启用响应存储');
+        const body=await readBody(req,config.requestLimit),id=`conv_${randomUUID().replaceAll('-','')}`;
+        if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(key=>!['items','metadata'].includes(key)))throw error(400,'对话请求无效');
+        if(body.items!==undefined&&(!Array.isArray(body.items)||body.items.length>20))throw error(400,'items 必须是最多 20 项的数组');
+        const value={id,created_at:Math.floor(Date.now()/1000),metadata:metadata(body.metadata),items:responseInputItems({input:body.items||[]})};conversationStore.set(id,value);
+        return json(res,200,conversationObject(value));
+      }
+      const conversationMatch=/^\/v1\/conversations\/([^/]+)(?:\/items(?:\/([^/]+))?)?$/.exec(path);
+      if(conversationMatch){
+        let conversationId,itemId;try{conversationId=decodeURIComponent(conversationMatch[1]);itemId=conversationMatch[2]&&decodeURIComponent(conversationMatch[2]);}catch{throw error(400,'对话资源 ID 编码无效');}
+        const value=conversationStore.get(conversationId),isItems=path.includes('/items');
+        if(!isItems){
+          if(req.method==='GET')return json(res,200,conversationObject(value));
+          if(req.method==='POST'){const body=await readBody(req,config.requestLimit);if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(key=>key!=='metadata'))throw error(400,'对话更新只支持 metadata');value.metadata=metadata(body.metadata);conversationStore.set(conversationId,value);return json(res,200,conversationObject(value));}
+          if(req.method==='DELETE'){conversationStore.delete(conversationId);return json(res,200,{id:conversationId,object:'conversation.deleted',deleted:true});}
+        }else if(itemId){
+          const index=value.items.findIndex(item=>item.id===itemId);if(index<0)throw error(404,`对话项不存在：${itemId}`);
+          if(req.method==='GET')return json(res,200,value.items[index]);
+          if(req.method==='DELETE'){value.items.splice(index,1);conversationStore.set(conversationId,value);return json(res,200,conversationObject(value));}
+        }else{
+          if(req.method==='POST'){const body=await readBody(req,config.requestLimit);if(!body||!Array.isArray(body.items)||!body.items.length||body.items.length>20||Object.keys(body).some(key=>key!=='items'))throw error(400,'items 必须是 1–20 项的数组');const added=responseInputItems({input:body.items});value.items.push(...added);conversationStore.set(conversationId,value);return json(res,200,{object:'list',data:added,first_id:added[0].id,last_id:added.at(-1).id,has_more:false});}
+          if(req.method==='GET'){
+            const order=requestUrl.searchParams.get('order')||'desc',limit=Number(requestUrl.searchParams.get('limit')||20),after=requestUrl.searchParams.get('after');
+            if(!['asc','desc'].includes(order)||!Number.isInteger(limit)||limit<1||limit>100||[...requestUrl.searchParams.keys()].some(key=>!['order','limit','after'].includes(key)))throw error(400,'对话项分页参数无效');
+            let items=order==='asc'?[...value.items]:[...value.items].reverse();if(after){const index=items.findIndex(item=>item.id===after);if(index<0)throw error(400,'after 对话项不存在');items=items.slice(index+1);}const has_more=items.length>limit;items=items.slice(0,limit);
+            return json(res,200,{object:'list',data:items,first_id:items[0]?.id??null,last_id:items.at(-1)?.id??null,has_more});
+          }
+        }
+        throw error(405,'该对话资源不支持此方法');
+      }
       const storedMatch=/^\/v1\/responses\/([^/]+)(\/(?:input_items|cancel))?$/.exec(path);
       if(storedMatch){
         let responseId;try{responseId=decodeURIComponent(storedMatch[1]);}catch{throw error(400,'响应 ID 编码无效');}
@@ -366,8 +409,16 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if (req.method !== 'POST' || !['/v1/chat/completions','/v1/completions','/v1/responses','/v1/messages'].includes(path)) throw error(404, '接口不存在');
       if (!tokenManager.configured) throw error(503, '请配置 GENAI_TOKEN 或 CAS 账号');
-      const rawInput = await readBody(req,config.requestLimit);
+      let rawInput = await readBody(req,config.requestLimit);
       if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) throw error(400, '请求必须是 JSON 对象');
+      let conversationId,conversationItems=[];
+      if(path==='/v1/responses'&&rawInput.conversation!==undefined){
+        if(rawInput.previous_response_id)throw error(400,'conversation 与 previous_response_id 不能同时使用');
+        conversationId=typeof rawInput.conversation==='string'?rawInput.conversation:rawInput.conversation?.id;
+        if(typeof conversationId!=='string'||!conversationId)throw error(400,'conversation 必须是非空 ID 或包含 id 的对象');
+        const conversation=conversationStore.get(conversationId);conversationItems=responseInputItems(rawInput);
+        rawInput={...rawInput,input:[...conversation.items,...conversationItems]};
+      }
       const media=extractImages(path,rawInput);
       const input = normalizeRequest(path,media.input);
       let previous;
@@ -387,7 +438,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       if(path==='/v1/responses'&&media.input.background===true){
         if(!(config.responseStoreSize??128))throw error(400,'background 模式需要启用响应存储');
         pruneBackground();
-        const backgroundRaw={...rawInput},queued=adapter.response([],'queued',null),inputItems=responseInputItems(backgroundRaw),log={events:[],waiters:new Set(),done:false,version:0,nextSequence:0,expires:Date.now()+(config.responseStoreTtl??3600000)},job={controller:new AbortController(),deleted:false,terminal:false,messages:structuredClone(input.messages),inputItems,store:media.input.store===true,log};
+        const backgroundRaw={...rawInput,conversation:undefined},queued=adapter.response([],'queued',null),inputItems=conversationId?conversationItems:responseInputItems(backgroundRaw),log={events:[],waiters:new Set(),done:false,version:0,nextSequence:0,expires:Date.now()+(config.responseStoreTtl??3600000)},job={controller:new AbortController(),deleted:false,terminal:false,messages:structuredClone(input.messages),inputItems,store:media.input.store===true,log,conversationId,conversationItems};
         addBackgroundEvent(log,'response.queued',{response:queued});backgroundStreams.set(queued.id,log);pruneBackground();
         responseStore.set(queued.id,{response:queued,messages:job.messages,input_items:inputItems});backgroundJobs.set(queued.id,job);
         setImmediate(()=>void runBackground(queued.id,backgroundRaw,job));
@@ -480,6 +531,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const completion = { id: last.id || `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: last.created || Math.floor(Date.now()/1000), model: input.model || last.model || 'qwen-instruct', choices: [{ index: 0, message: { role: 'assistant', content: parsed.content, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls}:{}) }, finish_reason: finish }], usage: normalizedUsage };
       if (adapter) {
         const result = await adapter.finish(completion,input.stream);
+        if(path==='/v1/responses'&&conversationId)appendConversation(conversationId,[...conversationItems,...result.output]);
         if(path==='/v1/responses'&&media.input.store===true){
           const assistant={role:'assistant',content:completion.choices[0].message.content,tool_calls:completion.choices[0].message.tool_calls};
           const inputItems=responseInputItems(media.input);

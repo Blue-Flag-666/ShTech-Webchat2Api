@@ -74,6 +74,26 @@ test('Responses 后台任务可以取消和删除',async()=>{
     assert.equal((await fetch(`${base}/v1/responses/${created.id}`,{headers})).status,404);
   });
 });
+
+test('Conversations 管理对话项并自动绑定 Responses 历史',async()=>{
+  await withServer(async(_url,options)=>{
+    const body=JSON.parse(options.body);assert.equal(body.chatInfo,'继续');assert.equal(body.messages[0].content,'旧问题');
+    return new Response(sse([chunk('新回答','stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async(_call,base)=>{
+    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
+    const created=await(await fetch(`${base}/v1/conversations`,{method:'POST',headers,body:JSON.stringify({metadata:{project:'demo'},items:[{type:'message',role:'user',content:'旧问题'}]})})).json();
+    assert.match(created.id,/^conv_/);assert.equal(created.metadata.project,'demo');
+    const before=await(await fetch(`${base}/v1/conversations/${created.id}/items?order=asc`,{headers})).json();assert.equal(before.data.length,1);
+    const response=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',conversation:created.id,input:'继续'})})).json();
+    assert.equal(response.conversation.id,created.id);assert.equal(response.output_text,'新回答');
+    const after=await(await fetch(`${base}/v1/conversations/${created.id}/items?order=asc`,{headers})).json();assert.equal(after.data.length,3);assert.equal(after.data.at(-1).role,'assistant');
+    const item=await(await fetch(`${base}/v1/conversations/${created.id}/items/${after.data[1].id}`,{headers})).json();assert.equal(item.role,'user');
+    assert.equal((await fetch(`${base}/v1/conversations/${created.id}/items/${after.data[0].id}`,{method:'DELETE',headers})).status,200);
+    const updated=await(await fetch(`${base}/v1/conversations/${created.id}`,{method:'POST',headers,body:JSON.stringify({metadata:{project:'updated'}})})).json();assert.equal(updated.metadata.project,'updated');
+    assert.equal((await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',conversation:created.id,previous_response_id:'resp_x',input:'x'})})).status,400);
+    const removed=await(await fetch(`${base}/v1/conversations/${created.id}`,{method:'DELETE',headers})).json();assert.equal(removed.object,'conversation.deleted');
+  });
+});
 test('转换当前输入与历史，保留配置', () => {
   const body = upstreamBody({...request,messages:[{role:'user',content:'旧问题'},{role:'assistant',content:'旧回答'},...request.messages]},config);
   assert.equal(body.chatInfo,'你好'); assert.equal(body.messages.length,2); assert.equal(body.netGo,false); assert.equal(body.chatGroupId,'test-group');
