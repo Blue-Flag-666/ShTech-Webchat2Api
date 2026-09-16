@@ -30,8 +30,8 @@ function archive(bytes){
 }
 
 function entity(value){
-  return value.replace(/&(?:#(x[\da-f]+|\d+)|amp|lt|gt|quot|apos);/gi,match=>{
-    if(match[1]){const hex=match[1][0].toLowerCase()==='x',code=Number.parseInt(hex?match[1].slice(1):match[1],hex?16:10);return Number.isFinite(code)&&code<=0x10ffff?String.fromCodePoint(code):'';}
+  return value.replace(/&(?:#(x[\da-f]+|\d+)|amp|lt|gt|quot|apos);/gi,(match,numeric)=>{
+    if(numeric){const hex=numeric[0].toLowerCase()==='x',code=Number.parseInt(hex?numeric.slice(1):numeric,hex?16:10);return Number.isFinite(code)&&code<=0x10ffff?String.fromCodePoint(code):'';}
     return {'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&apos;':"'"}[match.toLowerCase()]??match;
   });
 }
