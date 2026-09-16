@@ -126,6 +126,13 @@ test('接受本地 Responses 状态参数并拒绝无效内容能力',()=>{
   assert.equal(anthropic.temperature,1);assert.deepEqual(anthropic.stop,['END']);
 });
 
+test('Responses background 参数拒绝流式和禁用存储',()=>{
+  assert.equal(normalizeRequest('/v1/responses',{input:'x',background:true}).messages[0].content,'x');
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',background:true,stream:true}),/stream/);
+  assert.equal(normalizeRequest('/v1/responses',{input:'x',background:true,store:false}).messages[0].content,'x');
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',background:'yes'}),/布尔值/);
+});
+
 test('Chat 兼容旧版 functions/function_call，Responses 接受常用选项',()=>{
   const chat=normalizeRequest('/v1/chat/completions',{messages:[{role:'user',content:'x'}],functions:[{name:'run',parameters:{type:'object'}}],function_call:{name:'run'}});
   assert.equal(chat.tools[0].function.name,'run');assert.equal(chat.tool_choice.function.name,'run');assert.equal(chat.functions,undefined);

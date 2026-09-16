@@ -122,6 +122,16 @@ function chatUsage(value,promptEstimate,completionEstimate) {
   const total_tokens=count('total_tokens') ?? prompt_tokens+completion_tokens;
   return {...(value || {}),prompt_tokens,completion_tokens,total_tokens};
 }
+function responseInputItems(input) {
+  return Array.isArray(input.input)?structuredClone(input.input).map(item=>item&&typeof item==='object'&&!Array.isArray(item)?{...item,id:item.id||`item_${randomUUID().replaceAll('-','')}`}:{id:`item_${randomUUID().replaceAll('-','')}`,type:'input_text',text:String(item)})
+    :[{id:`msg_${randomUUID().replaceAll('-','')}`,type:'message',role:'user',content:[{type:'input_text',text:input.input}]}];
+}
+function responseAssistant(response) {
+  const messages=(response.output||[]).filter(item=>item?.type==='message');
+  const content=messages.flatMap(item=>item.content||[]).filter(part=>part?.type==='output_text').map(part=>part.text||'').join('')||null;
+  const tool_calls=(response.output||[]).filter(item=>['function_call','custom_tool_call'].includes(item?.type)).map(item=>({id:item.call_id,type:'function',function:{name:item.name,arguments:item.type==='custom_tool_call'?JSON.stringify({input:item.input}):item.arguments}}));
+  return {role:'assistant',content,...(tool_calls.length?{tool_calls}:{})};
+}
 function estimateTokens(value) {
   let images=0;
   const serialized=JSON.stringify(value,(_key,item)=>{
@@ -197,6 +207,7 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2) {
 export function createServer(config = configuration(), fetcher = upstreamFetch, modelFetcher = fetchModelList, tokenManager = new TokenManager(config), imageFetcher=fetch, frontendFetcher) {
   const queue=new RequestQueue(config.concurrency??1,config.queueSize??32,config.queueTimeout??120000);
   const responseStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000);
+  const backgroundJobs=new Map();
   let modelCache = { at: 0, data: [] };
   let modelRetryAfter = 0;
   let modelPending;
@@ -219,7 +230,28 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     })();
     try { return await modelPending; } finally { modelPending = undefined; }
   }
-  return http.createServer(async (req, res) => {
+  let server;
+  async function runBackground(id,raw,job) {
+    try{
+      job.controller.signal.throwIfAborted();
+      const current=responseStore.get(id);current.response={...current.response,status:'in_progress'};responseStore.set(id,current);
+      const address=server.address();if(!address||typeof address!=='object')throw new Error('本地服务尚未监听');
+      const host=address.family==='IPv6'?'[::1]':'127.0.0.1';
+      const response=await fetch(`http://${host}:${address.port}/v1/responses`,{method:'POST',headers:{Authorization:`Bearer ${config.key}`,'Content-Type':'application/json'},body:JSON.stringify({...raw,background:false,stream:false,store:false}),signal:job.controller.signal});
+      const value=await response.json();
+      if(!response.ok)throw new Error(value?.error?.message||`后台请求 HTTP ${response.status}`);
+      job.controller.signal.throwIfAborted();
+      responseStore.set(id,{response:{...value,id,background:true,store:job.store},messages:[...job.messages,responseAssistant(value)],input_items:job.inputItems});
+    }catch(cause){
+      if(job.deleted)return;
+      try{
+        const stored=responseStore.get(id),cancelled=job.controller.signal.aborted;
+        stored.response={...stored.response,status:cancelled?'cancelled':'failed',completed_at:null,error:cancelled?null:{code:'server_error',message:cause?.message||'后台请求失败'}};
+        responseStore.set(id,stored);
+      }catch{}
+    }finally{if(backgroundJobs.get(id)===job)backgroundJobs.delete(id);}
+  }
+  server=http.createServer(async (req, res) => {
     let controller, timer, release, path=req.url;
     try {
       path=new URL(req.url,'http://localhost').pathname;
@@ -233,16 +265,23 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
       if (!config.key || !authorized(req, config.key, path)) throw error(401, '需要有效的本地 API Bearer 密钥');
-      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,stored_responses:responseStore.size });
-      const storedMatch=/^\/v1\/responses\/([^/]+)(\/input_items)?$/.exec(path);
+      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size });
+      const storedMatch=/^\/v1\/responses\/([^/]+)(\/(?:input_items|cancel))?$/.exec(path);
       if(storedMatch){
         let responseId;try{responseId=decodeURIComponent(storedMatch[1]);}catch{throw error(400,'响应 ID 编码无效');}
         if(req.method==='GET'){
           const stored=responseStore.get(responseId);
-          if(storedMatch[2])return json(res,200,{object:'list',data:stored.input_items,first_id:stored.input_items[0]?.id??null,last_id:stored.input_items.at(-1)?.id??null,has_more:false});
+          if(storedMatch[2]==='/input_items')return json(res,200,{object:'list',data:stored.input_items,first_id:stored.input_items[0]?.id??null,last_id:stored.input_items.at(-1)?.id??null,has_more:false});
+          if(storedMatch[2])throw error(405,'该响应资源不支持此方法');
           return json(res,200,stored.response);
         }
-        if(req.method==='DELETE'&&!storedMatch[2]){responseStore.delete(responseId);return json(res,200,{id:responseId,object:'response.deleted',deleted:true});}
+        if(req.method==='POST'&&storedMatch[2]==='/cancel'){
+          const stored=responseStore.get(responseId),job=backgroundJobs.get(responseId);
+          if(!job||!['queued','in_progress'].includes(stored.response.status))throw error(400,'只有运行中的后台响应可以取消');
+          job.controller.abort();stored.response={...stored.response,status:'cancelled',completed_at:null,error:null};responseStore.set(responseId,stored);
+          return json(res,200,stored.response);
+        }
+        if(req.method==='DELETE'&&!storedMatch[2]){const job=backgroundJobs.get(responseId);if(job){job.deleted=true;job.controller.abort();backgroundJobs.delete(responseId);}responseStore.delete(responseId);return json(res,200,{id:responseId,object:'response.deleted',deleted:true});}
         throw error(405,'该响应资源不支持此方法');
       }
       const publicModel=model=>Object.fromEntries(Object.entries(model).filter(([key])=>key!=='upstream_id'));
@@ -270,7 +309,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const media=extractImages(path,rawInput);
       const input = normalizeRequest(path,media.input);
       let previous;
-      if(path==='/v1/responses'&&media.input.previous_response_id){previous=responseStore.get(media.input.previous_response_id);input.messages=[...previous.messages,...input.messages];}
+      if(path==='/v1/responses'&&media.input.previous_response_id){previous=responseStore.get(media.input.previous_response_id);if(!['completed','incomplete'].includes(previous.response.status))throw error(409,'previous_response_id 尚未完成');input.messages=[...previous.messages,...input.messages];}
       const formatPolicy=outputPolicy(path,media.input);
       const legacy=path==='/v1/completions';
       const adapter = path === '/v1/responses'||path==='/v1/messages' ? new ProtocolOutput(path,input,async frame=>{
@@ -283,6 +322,12 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const selected=catalogue.find(model=>model.id===(input.model??'qwen-instruct'));
       if(!selected)throw error(400,`模型不可用：${input.model}`);
       if(media.images.length&&!selected.capabilities?.vision)throw error(400,`模型 ${selected.id} 未确认支持图片输入`);
+      if(path==='/v1/responses'&&media.input.background===true){
+        if(!(config.responseStoreSize??128))throw error(400,'background 模式需要启用响应存储');
+        const backgroundRaw={...rawInput},queued=adapter.response([],'queued',null),inputItems=responseInputItems(backgroundRaw),job={controller:new AbortController(),deleted:false,messages:structuredClone(input.messages),inputItems,store:media.input.store===true};
+        responseStore.set(queued.id,{response:queued,messages:job.messages,input_items:inputItems});backgroundJobs.set(queued.id,job);
+        setImmediate(()=>void runBackground(queued.id,backgroundRaw,job));return json(res,200,queued);
+      }
       controller = new AbortController();
       res.on('close', () => {if(!res.writableEnded)controller.abort();});
       release=await queue.acquire(controller.signal);
@@ -371,7 +416,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         const result = await adapter.finish(completion,input.stream);
         if(path==='/v1/responses'&&media.input.store===true){
           const assistant={role:'assistant',content:completion.choices[0].message.content,tool_calls:completion.choices[0].message.tool_calls};
-          const inputItems=Array.isArray(media.input.input)?structuredClone(media.input.input).map(item=>item&&typeof item==='object'&&!Array.isArray(item)?{...item,id:item.id||`item_${randomUUID().replaceAll('-','')}`}:{id:`item_${randomUUID().replaceAll('-','')}`,type:'input_text',text:String(item)}):[{id:`msg_${randomUUID().replaceAll('-','')}`,type:'message',role:'user',content:[{type:'input_text',text:media.input.input}]}];
+          const inputItems=responseInputItems(media.input);
           responseStore.set(result.id,{response:result,messages:[...input.messages,assistant],input_items:inputItems});
         }
         if (input.stream) res.end();
@@ -408,6 +453,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
     } finally { clearTimeout(timer); controller?.abort(); release?.(); }
   });
+  return server;
 }
 export function startServer(config = configuration()) {
   if (!config.key) throw new Error('请在 .env 中设置 API_KEY');

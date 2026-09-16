@@ -126,6 +126,8 @@ export function normalizeRequest(path, input) {
   if (path === '/v1/responses') {
     keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning','text','parallel_tool_calls','include','temperature','top_p','service_tier','safety_identifier','prompt_cache_key','user','background']);
     if (input.store !== undefined && typeof input.store !== 'boolean') throw bad('store 必须为布尔值');
+    if(input.background!==undefined&&typeof input.background!=='boolean')throw bad('background 必须为布尔值');
+    if(input.background===true&&input.stream===true)throw bad('background 模式不支持 stream=true');
     if (input.previous_response_id !== undefined && (typeof input.previous_response_id!=='string'||!input.previous_response_id)) throw bad('previous_response_id 必须是非空字符串');
     if (input.instructions != null) out.messages.push({role:'system',content:text(input.instructions)});
     const items = typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
@@ -257,7 +259,7 @@ export class ProtocolOutput {
       reasoning:{effort:this.original.reasoning?.effort??null,summary:this.reasoning? 'auto':null},output_text:outputText,
       instructions:this.original.instructions??null,max_output_tokens:this.original.max_output_tokens??null,
       text:this.original.text??null,temperature:this.original.temperature??null,top_p:this.original.top_p??null,
-      previous_response_id:this.original.previous_response_id??null,background:false,conversation:null,service_tier:this.original.service_tier??null};
+      previous_response_id:this.original.previous_response_id??null,background:this.original.background===true,conversation:null,service_tier:this.original.service_tier??null};
   }
   message(content=[],stop_reason=null,usage={input_tokens:0,output_tokens:0}) {
     return {id:this.id,type:'message',role:'assistant',model:this.input.model || 'qwen-instruct',content,stop_reason,stop_sequence:null,usage:{cache_creation_input_tokens:0,cache_read_input_tokens:0,...usage}};

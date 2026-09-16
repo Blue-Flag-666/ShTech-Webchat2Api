@@ -27,6 +27,31 @@ test('图片输入上传后转换为 Webchat 图片字段',async()=>{
   },{uploadToken:'upload-token',imageFetcher:async()=>{uploads++;return new Response(JSON.stringify({success:true,result:{url:'test.png',width:1,height:1}}),{headers:{'content-type':'application/json'}});}});
   assert.equal(uploads,1);
 });
+
+test('Responses 后台任务可轮询完成并保留输入项',async()=>{
+  let release;const gate=new Promise(resolve=>{release=resolve;});
+  await withServer(async()=>{await gate;return new Response(sse([chunk('后台完成','stop')]),{headers:{'content-type':'text/event-stream'}});},async(_call,base)=>{
+    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
+    const created=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',input:'长任务',background:true})})).json();
+    assert.equal(created.status,'queued');assert.equal(created.background,true);assert.equal(created.store,false);assert.match(created.id,/^resp_/);
+    const pending=await(await fetch(`${base}/v1/responses/${created.id}`,{headers})).json();assert.ok(['queued','in_progress'].includes(pending.status));
+    release();let completed;
+    for(let i=0;i<100;i++){completed=await(await fetch(`${base}/v1/responses/${created.id}`,{headers})).json();if(completed.status==='completed')break;await new Promise(resolve=>setTimeout(resolve,10));}
+    assert.equal(completed.status,'completed');assert.equal(completed.id,created.id);assert.equal(completed.background,true);assert.equal(completed.output_text,'后台完成');
+    const items=await(await fetch(`${base}/v1/responses/${created.id}/input_items`,{headers})).json();assert.equal(items.data[0].content[0].text,'长任务');
+  });
+});
+
+test('Responses 后台任务可以取消和删除',async()=>{
+  await withServer(async(_url,options)=>new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason||new Error('aborted')),{once:true})),async(_call,base)=>{
+    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
+    const created=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',input:'等待',background:true})})).json();
+    const cancelled=await(await fetch(`${base}/v1/responses/${created.id}/cancel`,{method:'POST',headers})).json();assert.equal(cancelled.status,'cancelled');
+    const stored=await(await fetch(`${base}/v1/responses/${created.id}`,{headers})).json();assert.equal(stored.status,'cancelled');
+    assert.equal((await fetch(`${base}/v1/responses/${created.id}`,{method:'DELETE',headers})).status,200);
+    assert.equal((await fetch(`${base}/v1/responses/${created.id}`,{headers})).status,404);
+  });
+});
 test('转换当前输入与历史，保留配置', () => {
   const body = upstreamBody({...request,messages:[{role:'user',content:'旧问题'},{role:'assistant',content:'旧回答'},...request.messages]},config);
   assert.equal(body.chatInfo,'你好'); assert.equal(body.messages.length,2); assert.equal(body.netGo,false); assert.equal(body.chatGroupId,'test-group');
