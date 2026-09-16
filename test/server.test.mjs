@@ -94,6 +94,25 @@ test('Conversations 管理对话项并自动绑定 Responses 历史',async()=>{
     const removed=await(await fetch(`${base}/v1/conversations/${created.id}`,{method:'DELETE',headers})).json();assert.equal(removed.object,'conversation.deleted');
   });
 });
+
+test('Responses compact 生成可续用状态并提供输入 token 计数',async()=>{
+  let calls=0;
+  const modelFetcher=async()=>({success:true,result:{records:[{aiType:'Kimi-k3',simpleName:'Kimi-K3',maxToken:800000,rootAiType:'xinference'}]}});
+  await withServer(async(_url,options)=>{
+    calls++;const body=JSON.parse(options.body);
+    if(calls===1){assert.equal(body.aiType,'Kimi-k3');assert.match(body.chatInfo,/compact state/i);return new Response(sse([chunk('保留项目约束和未完成任务','stop')]),{headers:{'content-type':'text/event-stream'}});}
+    assert.ok(body.messages.some(message=>message.role==='system'&&message.content.includes('保留项目约束')));
+    return new Response(sse([chunk('已继续','stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async(_call,base)=>{
+    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
+    const compacted=await(await fetch(`${base}/v1/responses/compact`,{method:'POST',headers,body:JSON.stringify({input:'旧任务'})})).json();
+    assert.equal(compacted.object,'response.compaction');assert.equal(compacted.output.at(-1).type,'compaction');assert.match(compacted.output.at(-1).encrypted_content,/^cmpstate_/);
+    const counted=await(await fetch(`${base}/v1/responses/input_tokens`,{method:'POST',headers,body:JSON.stringify({model:'kimi-k3',input:compacted.output})})).json();
+    assert.equal(counted.object,'response.input_tokens');assert.ok(counted.input_tokens>0);
+    const continued=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'kimi-k3',input:[...compacted.output,{type:'message',role:'user',content:'继续'}]})})).json();
+    assert.equal(continued.output_text,'已继续');assert.equal(calls,2);
+  },{modelFetcher});
+});
 test('转换当前输入与历史，保留配置', () => {
   const body = upstreamBody({...request,messages:[{role:'user',content:'旧问题'},{role:'assistant',content:'旧回答'},...request.messages]},config);
   assert.equal(body.chatInfo,'你好'); assert.equal(body.messages.length,2); assert.equal(body.netGo,false); assert.equal(body.chatGroupId,'test-group');

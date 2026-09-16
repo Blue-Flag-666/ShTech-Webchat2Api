@@ -40,6 +40,8 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     assert.equal(continued.conversation.id,conversation.id);
     const conversationItems=await client.conversations.items.list(conversation.id,{order:'asc'});assert.equal(conversationItems.data.length,3);
     assert.equal((await client.conversations.delete(conversation.id)).deleted,true);
+    const tokenCount=await client.responses.inputTokens.count({model:'qwen-instruct',input:'你好'});assert.equal(tokenCount.object,'response.input_tokens');assert.ok(tokenCount.input_tokens>0);
+    const compacted=await client.responses.compact({model:'qwen-instruct',input:'需要压缩的任务'});assert.equal(compacted.object,'response.compaction');assert.equal(compacted.output.at(-1).type,'compaction');
     const responseStream=await client.responses.create({model:'qwen-instruct',input:'你好',store:false,stream:true});
     let responseText='';for await(const event of responseStream)if(event.type==='response.output_text.delta')responseText+=event.delta;
     assert.equal(responseText,'你好');

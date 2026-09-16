@@ -134,6 +134,13 @@ test('Responses background 参数接受流式和禁用存储',()=>{
   assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',background:'yes'}),/布尔值/);
 });
 
+test('Responses 接受上下文裁剪配置并拒绝无效阈值',()=>{
+  const value=normalizeRequest('/v1/responses',{input:'x',truncation:'auto',context_management:[{type:'compaction',compact_threshold:1000}]});
+  assert.equal(value.messages[0].content,'x');
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',truncation:'drop'}),/truncation/);
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',context_management:[{type:'compaction',compact_threshold:0}]}),/context_management/);
+});
+
 test('Chat 兼容旧版 functions/function_call，Responses 接受常用选项',()=>{
   const chat=normalizeRequest('/v1/chat/completions',{messages:[{role:'user',content:'x'}],functions:[{name:'run',parameters:{type:'object'}}],function_call:{name:'run'}});
   assert.equal(chat.tools[0].function.name,'run');assert.equal(chat.tool_choice.function.name,'run');assert.equal(chat.functions,undefined);

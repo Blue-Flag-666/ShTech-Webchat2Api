@@ -209,6 +209,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
   const queue=new RequestQueue(config.concurrency??1,config.queueSize??32,config.queueTimeout??120000);
   const responseStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000);
   const conversationStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'对话');
+  const compactionStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'压缩状态');
   const backgroundJobs=new Map();
   const backgroundStreams=new Map();
   function notifyBackground(log){log.version++;for(const notify of log.waiters)notify();log.waiters.clear();}
@@ -235,6 +236,21 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
   const conversationObject=value=>({id:value.id,object:'conversation',created_at:value.created_at,metadata:value.metadata});
   function appendConversation(id,items){
     if(!id)return;const value=conversationStore.get(id);value.items.push(...structuredClone(items));conversationStore.set(id,value);
+  }
+  function expandCompactions(input){
+    if(!Array.isArray(input))return input;
+    return input.map(item=>{
+      if(item?.type!=='compaction')return item;
+      if(typeof item.encrypted_content!=='string'||!item.encrypted_content)throw error(400,'compaction item 缺少 encrypted_content');
+      const value=compactionStore.get(item.encrypted_content);
+      return {id:item.id||`cmp_${randomUUID().replaceAll('-','')}`,type:'message',role:'developer',content:[{type:'input_text',text:`Compacted conversation state:\n${value.summary}`}]};
+    });
+  }
+  function truncateMessages(messages,threshold){
+    if(!Number.isInteger(threshold)||threshold<1||estimateTokens(messages)<=threshold)return messages;
+    const system=messages.filter(message=>message.role==='system'),turns=messages.filter(message=>message.role!=='system');
+    while(turns.length>1&&estimateTokens([...system,...turns])>threshold)turns.shift();
+    return [...system,...turns];
   }
   async function streamBackground(req,res,log,startingAfter=-1){
     res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
@@ -328,7 +344,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
       if (!config.key || !authorized(req, config.key, path)) throw error(401, '需要有效的本地 API Bearer 密钥');
-      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size });
+      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size });
       if(req.method==='POST'&&path==='/v1/conversations'){
         if(!(config.responseStoreSize??128))throw error(400,'Conversations 需要启用响应存储');
         const body=await readBody(req,config.requestLimit),id=`conv_${randomUUID().replaceAll('-','')}`;
@@ -407,10 +423,37 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         const catalogue=await models();if(!catalogue.some(model=>model.id===value.model))throw error(400,`模型不可用：${value.model}`);
         return json(res,200,{data:{total_tokens:estimateTokens(value)}});
       }
+      if(req.method==='POST'&&path==='/v1/responses/input_tokens'){
+        let value=await readBody(req,config.requestLimit);if(!value||typeof value!=='object'||Array.isArray(value))throw error(400,'请求必须是 JSON 对象');
+        let history=[];
+        if(value.conversation!==undefined){
+          if(value.previous_response_id)throw error(400,'conversation 与 previous_response_id 不能同时使用');
+          const id=typeof value.conversation==='string'?value.conversation:value.conversation?.id;if(typeof id!=='string'||!id)throw error(400,'conversation 无效');
+          value={...value,input:[...conversationStore.get(id).items,...responseInputItems(value)]};
+        }
+        if(value.previous_response_id){const previous=responseStore.get(value.previous_response_id);history=previous.messages;value={...value,input:responseInputItems(value)};}
+        value={...value,input:expandCompactions(value.input)};
+        return json(res,200,{object:'response.input_tokens',input_tokens:estimateTokens(value)+estimateTokens(history)});
+      }
+      if(req.method==='POST'&&path==='/v1/responses/compact'){
+        if(!(config.responseStoreSize??128))throw error(400,'Responses compact 需要启用响应存储');
+        const value=await readBody(req,config.requestLimit);if(!value||typeof value!=='object'||Array.isArray(value))throw error(400,'请求必须是 JSON 对象');
+        const allowed=['model','input','instructions','previous_response_id','conversation','prompt_cache_key','service_tier'];if(Object.keys(value).some(key=>!allowed.includes(key)))throw error(400,'compact 请求包含不支持的参数');
+        if(value.conversation!==undefined&&value.previous_response_id)throw error(400,'conversation 与 previous_response_id 不能同时使用');
+        const originalItems=responseInputItems(value),items=Array.isArray(value.input)?value.input:value.input===undefined?[]:[{type:'message',role:'user',content:value.input}];
+        const address=server.address();if(!address||typeof address!=='object')throw error(503,'本地服务尚未监听');const host=address.family==='IPv6'?'[::1]':'127.0.0.1';
+        const compactPrompt='Create a compact state for continuing this work. Preserve requirements, decisions, code facts, tool results, unresolved tasks, names, identifiers, and exact constraints. Remove repetition. Return only the compact state.';
+        const response=await fetch(`http://${host}:${address.port}/v1/responses`,{method:'POST',headers:{Authorization:`Bearer ${config.key}`,'Content-Type':'application/json','X-Shtech-Internal-Compact':'1'},body:JSON.stringify({...value,model:value.model||'kimi-k3',input:[...items,{type:'message',role:'user',content:compactPrompt}],instructions:[value.instructions,compactPrompt].filter(Boolean).join('\n\n'),stream:false,store:false,background:false,max_output_tokens:4096})});
+        const compacted=await response.json();if(!response.ok)throw error(response.status,compacted?.error?.message||'压缩请求失败');
+        const token=`cmpstate_${randomUUID().replaceAll('-','')}`,item={id:`cmp_${randomUUID().replaceAll('-','')}`,type:'compaction',encrypted_content:token};compactionStore.set(token,{summary:compacted.output_text});
+        const output=[...originalItems.filter(entry=>entry?.role==='user'),item];
+        return json(res,200,{id:`resp_${randomUUID().replaceAll('-','')}`,object:'response.compaction',created_at:Math.floor(Date.now()/1000),output,usage:compacted.usage});
+      }
       if (req.method !== 'POST' || !['/v1/chat/completions','/v1/completions','/v1/responses','/v1/messages'].includes(path)) throw error(404, '接口不存在');
       if (!tokenManager.configured) throw error(503, '请配置 GENAI_TOKEN 或 CAS 账号');
       let rawInput = await readBody(req,config.requestLimit);
       if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) throw error(400, '请求必须是 JSON 对象');
+      if(path==='/v1/responses')rawInput={...rawInput,input:expandCompactions(rawInput.input)};
       let conversationId,conversationItems=[];
       if(path==='/v1/responses'&&rawInput.conversation!==undefined){
         if(rawInput.previous_response_id)throw error(400,'conversation 与 previous_response_id 不能同时使用');
@@ -434,6 +477,11 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       if (!catalogue.length) throw error(503, '模型目录没有已确认的自部署国内模型');
       const selected=catalogue.find(model=>model.id===(input.model??'qwen-instruct'));
       if(!selected)throw error(400,`模型不可用：${input.model}`);
+      if(path==='/v1/responses'){
+        const configured=media.input.context_management?.find(item=>item.type==='compaction')?.compact_threshold;
+        const threshold=configured??(media.input.truncation==='auto'?Math.max(1,(selected.max_tokens||16384)-(input.max_tokens||4096)):undefined);
+        if(threshold)input.messages=truncateMessages(input.messages,threshold);
+      }
       if(media.images.length&&!selected.capabilities?.vision)throw error(400,`模型 ${selected.id} 未确认支持图片输入`);
       if(path==='/v1/responses'&&media.input.background===true){
         if(!(config.responseStoreSize??128))throw error(400,'background 模式需要启用响应存储');
@@ -531,7 +579,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const completion = { id: last.id || `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: last.created || Math.floor(Date.now()/1000), model: input.model || last.model || 'qwen-instruct', choices: [{ index: 0, message: { role: 'assistant', content: parsed.content, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls}:{}) }, finish_reason: finish }], usage: normalizedUsage };
       if (adapter) {
         const result = await adapter.finish(completion,input.stream);
-        if(path==='/v1/responses'&&conversationId)appendConversation(conversationId,[...conversationItems,...result.output]);
+        if(path==='/v1/responses'&&conversationId&&req.headers['x-shtech-internal-compact']!=='1')appendConversation(conversationId,[...conversationItems,...result.output]);
         if(path==='/v1/responses'&&media.input.store===true){
           const assistant={role:'assistant',content:completion.choices[0].message.content,tool_calls:completion.choices[0].message.tool_calls};
           const inputItems=responseInputItems(media.input);
