@@ -20,7 +20,7 @@ function responseTools(tools) {
   const add=(tool,depth=0)=>{
     if(depth>4)throw bad('namespace 工具嵌套过深');
     if (!tool || typeof tool!=='object' || Array.isArray(tool)) throw bad('无效 Responses 工具声明');
-    if(['web_search','web_search_preview'].includes(tool.type))return;
+    if(['web_search','web_search_preview','file_search'].includes(tool.type))return;
     if (tool.type==='namespace') {
       if (!Array.isArray(tool.tools)) throw bad('namespace.tools 必须为数组');
       for (const child of tool.tools) add(child,depth+1);
@@ -44,7 +44,7 @@ function responseToolChoice(choice, tools) {
   if (choice===undefined || typeof choice==='string') return {choice,tools};
   if (!choice || typeof choice!=='object' || Array.isArray(choice)) throw bad('无效 tool_choice');
   if (['function','custom'].includes(choice.type)) return {choice:{type:'function',function:{name:choice.name}},tools};
-  if(['web_search','web_search_preview'].includes(choice.type))return{choice:'auto',tools};
+  if(['web_search','web_search_preview','file_search'].includes(choice.type))return{choice:'auto',tools};
   if (choice.type!=='allowed_tools' || !['auto','required'].includes(choice.mode) || !Array.isArray(choice.tools) || !choice.tools.length) throw bad('无效 tool_choice');
   const allowed=new Set(choice.tools.map(tool=>{
     if (!tool || !['function','custom'].includes(tool.type) || typeof tool.name!=='string') throw bad('allowed_tools 包含无效工具');
@@ -151,7 +151,7 @@ export function normalizeRequest(path, input) {
         if (!Array.isArray(source)) throw bad('reasoning.content 或 reasoning.summary 必须为数组');
         const summary=text(source,['reasoning_text','summary_text']);
         if (summary) out.messages.push({role:'assistant',content:`[Reasoning summary]\n${summary}`});
-      } else if(item?.type==='web_search_call') {
+      } else if(['web_search_call','file_search_call'].includes(item?.type)) {
         continue;
       } else if(item?.type==='item_reference') {
         continue;
@@ -192,7 +192,7 @@ export function normalizeRequest(path, input) {
     out.tools=selected.tools;out.tool_choice=selected.choice;
     out.net_go=webSearch;
     if (input.parallel_tool_calls!==undefined && typeof input.parallel_tool_calls!=='boolean') throw bad('parallel_tool_calls 必须为布尔值');
-    if (input.include!==undefined && (!Array.isArray(input.include) || input.include.some(value=>!['reasoning.encrypted_content','web_search_call.results','web_search_call.action.sources'].includes(value)))) throw bad('include 包含不支持的字段');
+    if (input.include!==undefined && (!Array.isArray(input.include) || input.include.some(value=>!['reasoning.encrypted_content','web_search_call.results','web_search_call.action.sources','file_search_call.results'].includes(value)))) throw bad('include 包含不支持的字段');
     out.parallel_tool_calls=input.parallel_tool_calls;
     out.max_tokens = input.max_output_tokens;
     out.temperature=input.temperature;out.top_p=input.top_p;out.service_tier=input.service_tier;out.user=input.user;
@@ -263,12 +263,13 @@ export function tokenUsage(completion, input) {
     output_tokens:output,output_tokens_details:completion.usage?.completion_tokens_details||completion.usage?.output_tokens_details||{reasoning_tokens:estimate(completion.choices[0].message.reasoning_content)},total_tokens:prompt+output};
 }
 export class ProtocolOutput {
-  constructor(path, input, emit, original = {}) {
+  constructor(path, input, emit, original = {}, context = {}) {
     this.path=path; this.input=input; this.emit=emit; this.sequence=0;
     this.id=id(path === '/v1/responses' ? 'resp' : 'msg');
     this.messageId=id('msg'); this.reasoningId=id('rs'); this.created=Math.floor(Date.now()/1000);
     this.reasoningEncryptedContent=`enc_${randomUUID().replaceAll('-','')}`;
     this.text=''; this.reasoning=''; this.started=false; this.textIndex=null; this.reasoningIndex=null; this.nextIndex=0;
+    this.fileSearchItem=context.fileSearchItem||null;this.fileSearchIndex=null;
     this.metadata=original.metadata || {};this.original=original;this.customTools=new Set();
     const collect=tools=>{for(const tool of tools || [])if(tool?.type==='namespace')collect(tool.tools);else if(tool?.type==='custom'&&typeof tool.name==='string')this.customTools.add(tool.name);};
     collect(original.tools);
@@ -301,6 +302,7 @@ export class ProtocolOutput {
     if (this.path === '/v1/responses') {
       await this.event('response.created',{response:this.response()});
       await this.event('response.in_progress',{response:this.response()});
+      if(this.fileSearchItem){this.fileSearchIndex=this.nextIndex++;await this.event('response.output_item.added',{output_index:this.fileSearchIndex,item:{...this.fileSearchItem,status:'in_progress'}});await this.event('response.output_item.done',{output_index:this.fileSearchIndex,item:this.fileSearchItem});}
     } else await this.event('message_start',{message:this.message([],null,{input_tokens:tokenUsage({choices:[{message:{}}]},this.input).input_tokens,output_tokens:0})});
   }
   async delta(value) {
@@ -346,14 +348,14 @@ export class ProtocolOutput {
         : {id:id('fc'),type:'function_call',status:'completed',call_id:call.id,name:call.function.name,arguments:call.function.arguments}
       : {type:'tool_use',id:call.id,name:call.function.name,input:JSON.parse(call.function.arguments)});
     let output=[];
-    if(!stream) output=[...(this.reasoning?[reasoningItem]:[]),...(message.content?[messageItem]:[]),...callItems];
+    if(!stream) output=[...(this.fileSearchItem?[this.fileSearchItem]:[]),...(this.reasoning?[reasoningItem]:[]),...(message.content?[messageItem]:[]),...callItems];
     const result=response ? this.response(output,limited?'incomplete':'completed',usage)
       : this.message(output,calls.length?'tool_use':limited?'max_tokens':'end_turn',{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,output_tokens_details:{thinking_tokens:usage.output_tokens_details?.reasoning_tokens||0}});
     if (!stream) return result;
     await this.start();
     if (this.reasoningIndex===null && this.reasoning) { const value=this.reasoning;this.reasoning='';await this.reasoningDelta(value); }
     if (this.textIndex===null && message.content) await this.delta(message.content);
-    const indexed=[];
+    const indexed=this.fileSearchItem?[[this.fileSearchIndex,this.fileSearchItem]]:[];
     if (this.reasoningIndex!==null) {
       indexed.push([this.reasoningIndex,reasoningItem]);
       if(response) {

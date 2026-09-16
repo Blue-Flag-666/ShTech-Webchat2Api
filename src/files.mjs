@@ -13,7 +13,7 @@ function cleanFilename(value){
   return name;
 }
 
-async function pdfFile(file,maxPages){
+async function pdfText(file,maxPages){
   let pdf;
   try{
     const {extractText,getDocumentProxy}=await import('unpdf');
@@ -21,20 +21,25 @@ async function pdfFile(file,maxPages){
     if(pdf.numPages>maxPages)throw failure(400,`PDF 页数不能超过 ${maxPages}`);
     const result=await extractText(pdf,{mergePages:true}),value=typeof result.text==='string'?result.text:result.text.join('\n\n');
     if(!value.trim())throw failure(400,`PDF ${file.filename} 没有可提取的文本，暂不支持扫描件 OCR`);
-    return `<attached_file name=${JSON.stringify(file.filename)} media_type="application/pdf" pages=${result.totalPages}>\n${value}\n</attached_file>`;
+    return {text:value,pages:result.totalPages,mime:'application/pdf'};
   }catch(error){
     if(error?.status)throw error;
     throw failure(400,`无法读取 PDF ${file.filename}`);
   }finally{try{await pdf?.destroy();}catch{}}
 }
 
-async function textFile(file,maxPages){
+export async function extractFileText(file,maxPages=200){
   const mime=(file.mime||'').split(';')[0].toLowerCase(),extension=extname(file.filename).toLowerCase();
-  if(mime==='application/pdf'||extension==='.pdf')return pdfFile(file,maxPages);
+  if(mime==='application/pdf'||extension==='.pdf')return pdfText(file,maxPages);
   if(!(mime.startsWith('text/')||['application/json','application/jsonl','application/xml','application/yaml','application/x-yaml','application/toml','application/javascript'].includes(mime)||TEXT_EXTENSIONS.has(extension)))throw failure(400,`暂不支持读取文件类型：${mime||extension||'unknown'}`);
   let value;try{value=new TextDecoder('utf-8',{fatal:true}).decode(file.bytes);}catch{throw failure(400,`文件 ${file.filename} 不是有效 UTF-8 文本`);}
-  return `<attached_file name=${JSON.stringify(file.filename)} media_type=${JSON.stringify(mime||'text/plain')}>
-${value}
+  return {text:value,mime:mime||'text/plain'};
+}
+
+async function textFile(file,maxPages){
+  const parsed=await extractFileText(file,maxPages);
+  return `<attached_file name=${JSON.stringify(file.filename)} media_type=${JSON.stringify(parsed.mime)}${parsed.pages?` pages=${parsed.pages}`:''}>
+${parsed.text}
 </attached_file>`;
 }
 

@@ -112,6 +112,23 @@ test('Responses compact 生成可续用状态并提供输入 token 计数',async
     assert.equal(continued.output_text,'已继续');assert.equal(calls,2);
   },{modelFetcher});
 });
+test('Vector Stores API 为 Responses file_search 注入检索结果',async()=>{
+  await withServer(async(_url,options)=>{
+    const body=JSON.parse(options.body);assert.ok(body.messages.some(message=>message.role==='system'&&message.content.includes('blue-green deployment')));assert.equal(body.chatInfo,'How should production be deployed?');
+    return new Response(sse([chunk('Use blue-green deployment.','stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async(_call,base)=>{
+    const auth={authorization:`Bearer ${config.key}`},jsonHeaders={...auth,'content-type':'application/json'};
+    const form=new FormData();form.set('purpose','assistants');form.set('file',new File(['Production uses blue-green deployment and keeps the previous image for rollback.'],'runbook.md',{type:'text/markdown'}));
+    const file=await(await fetch(`${base}/v1/files`,{method:'POST',headers:auth,body:form})).json();
+    const store=await(await fetch(`${base}/v1/vector_stores`,{method:'POST',headers:jsonHeaders,body:JSON.stringify({name:'runbooks',file_ids:[file.id]})})).json();
+    assert.match(store.id,/^vs_/);assert.equal(store.file_counts.completed,1);
+    const search=await(await fetch(`${base}/v1/vector_stores/${store.id}/search`,{method:'POST',headers:jsonHeaders,body:JSON.stringify({query:'production deployment'})})).json();assert.equal(search.data[0].filename,'runbook.md');
+    const response=await(await fetch(`${base}/v1/responses`,{method:'POST',headers:jsonHeaders,body:JSON.stringify({model:'qwen-instruct',input:'How should production be deployed?',tools:[{type:'file_search',vector_store_ids:[store.id]}],include:['file_search_call.results'],store:false})})).json();
+    assert.equal(response.output_text,'Use blue-green deployment.');const call=response.output.find(item=>item.type==='file_search_call');assert.equal(call.status,'completed');assert.equal(call.results[0].file_id,file.id);
+    const listed=await(await fetch(`${base}/v1/vector_stores/${store.id}/files`,{headers:auth})).json();assert.equal(listed.data[0].id,file.id);
+    assert.equal((await fetch(`${base}/v1/vector_stores/${store.id}`,{method:'DELETE',headers:auth})).status,200);
+  });
+});
 test('Responses 默认保存 reasoning，并用 item_reference 续接 OpenCode 会话',async()=>{
   let calls=0;
   await withServer(async(_url,options)=>{

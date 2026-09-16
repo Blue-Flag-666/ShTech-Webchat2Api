@@ -7,7 +7,7 @@ import { Writable } from 'node:stream';
 import { createInterface } from 'node:readline/promises';
 import { configuration, startServer } from './server.mjs';
 
-const VERSION = '0.12.0';
+const VERSION = '0.13.0';
 const sea = isSea();
 const defaultConfig = sea ? join(dirname(process.execPath), '.env') : resolve('.env');
 

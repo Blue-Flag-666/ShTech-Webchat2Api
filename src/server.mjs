@@ -13,6 +13,7 @@ import { ResponseStore } from './response-store.mjs';
 import { FileStore, expandInputFiles, parseMultipart, readRawBody, uploadedFile } from './files.mjs';
 import { UploadStore, uploadPart } from './uploads.mjs';
 import { BatchStore } from './batches.mjs';
+import { VectorStore } from './vector-stores.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
 const error = (status, message) => Object.assign(new Error(message), { status });
@@ -28,6 +29,7 @@ export function configuration(env = process.env) {
     responseStoreSize:Number(env.GENAI_RESPONSE_STORE_SIZE || 128),responseStoreTtl:Number(env.GENAI_RESPONSE_STORE_TTL_MS || 3600000),
     fileStoreSize:Number(env.GENAI_FILE_STORE_SIZE || 32),fileStoreTtl:Number(env.GENAI_FILE_STORE_TTL_MS || 3600000),fileMaxBytes:Number(env.GENAI_FILE_MAX_MB || 2)*1024*1024,pdfMaxPages:Number(env.GENAI_PDF_MAX_PAGES || 200),
     batchStoreSize:Number(env.GENAI_BATCH_STORE_SIZE || 32),batchStoreTtl:Number(env.GENAI_BATCH_STORE_TTL_MS || 3600000),
+    vectorStoreSize:Number(env.GENAI_VECTOR_STORE_SIZE || 32),vectorStoreTtl:Number(env.GENAI_VECTOR_STORE_TTL_MS || 3600000),vectorStoreMaxFiles:Number(env.GENAI_VECTOR_STORE_MAX_FILES || 100),
     upstreamRetries:Number(env.GENAI_UPSTREAM_RETRIES ?? 2),corsOrigin:env.CORS_ORIGIN || '' };
 }
 
@@ -228,6 +230,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     return{status:response.status,requestId:response.headers.get('x-request-id')||requestId,body:value};
   }
   const batchStore=new BatchStore(fileStore,dispatchBatch,{maximum:config.batchStoreSize??32,ttl:config.batchStoreTtl??3600000});
+  const vectorStore=new VectorStore(fileStore,{maximum:config.vectorStoreSize??32,ttl:config.vectorStoreTtl??3600000,maxFiles:config.vectorStoreMaxFiles??100,pdfMaxPages:config.pdfMaxPages??200});
   const backgroundJobs=new Map();
   const backgroundStreams=new Map();
   function notifyBackground(log){log.version++;for(const notify of log.waiters)notify();log.waiters.clear();}
@@ -371,7 +374,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
       if (!config.key || !authorized(req, config.key, path)) throw error(401, '需要有效的本地 API Bearer 密钥');
-      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,active_batches:batchStore.active,stored_batches:batchStore.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size,stored_items:itemReferenceStore.size,stored_files:fileStore.size,pending_uploads:uploadStore.size });
+      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,active_batches:batchStore.active,stored_batches:batchStore.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size,stored_items:itemReferenceStore.size,stored_files:fileStore.size,pending_uploads:uploadStore.size,stored_vector_stores:vectorStore.size,indexed_vector_files:vectorStore.fileCount });
       if(req.method==='POST'&&path==='/v1/uploads')return json(res,200,uploadStore.create(await readBody(req,config.requestLimit)));
       const uploadMatch=/^\/v1\/uploads\/([^/]+)\/(parts|complete|cancel)$/.exec(path);
       if(uploadMatch){
@@ -403,6 +406,56 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         if(req.method==='GET')return json(res,200,fileStore.get(fileId));
         if(req.method==='DELETE'&&!fileMatch[2]){fileStore.delete(fileId);return json(res,200,{id:fileId,object:'file',deleted:true});}
         throw error(405,'文件资源不支持此方法');
+      }
+      if(path==='/v1/vector_stores'){
+        if(req.method==='POST')return json(res,200,await vectorStore.create(await readBody(req,config.requestLimit)));
+        if(req.method==='GET'){
+          const options={limit:Number(requestUrl.searchParams.get('limit')||20),order:requestUrl.searchParams.get('order')||'desc',after:requestUrl.searchParams.get('after')||undefined,before:requestUrl.searchParams.get('before')||undefined};
+          if([...requestUrl.searchParams.keys()].some(key=>!['limit','order','after','before'].includes(key)))throw error(400,'向量库分页参数无效');return json(res,200,vectorStore.list(options));
+        }
+        throw error(405,'向量库集合不支持此方法');
+      }
+      const vectorFileMatch=/^\/v1\/vector_stores\/([^/]+)\/files\/([^/]+)(\/content)?$/.exec(path);
+      if(vectorFileMatch){
+        let storeId,fileId;try{storeId=decodeURIComponent(vectorFileMatch[1]);fileId=decodeURIComponent(vectorFileMatch[2]);}catch{throw error(400,'向量库文件 ID 编码无效');}
+        if(req.method==='GET'&&vectorFileMatch[3])return json(res,200,vectorStore.content(storeId,fileId));
+        if(req.method==='GET')return json(res,200,vectorStore.getFile(storeId,fileId));
+        if(req.method==='POST'&&!vectorFileMatch[3])return json(res,200,vectorStore.updateFile(storeId,fileId,await readBody(req,config.requestLimit)));
+        if(req.method==='DELETE'&&!vectorFileMatch[3])return json(res,200,vectorStore.deleteFile(storeId,fileId));
+        throw error(405,'向量库文件资源不支持此方法');
+      }
+      const vectorBatchMatch=/^\/v1\/vector_stores\/([^/]+)\/file_batches\/([^/]+)(\/(?:cancel|files))?$/.exec(path);
+      if(vectorBatchMatch){
+        let storeId,batchId;try{storeId=decodeURIComponent(vectorBatchMatch[1]);batchId=decodeURIComponent(vectorBatchMatch[2]);}catch{throw error(400,'向量库批次 ID 编码无效');}
+        if(req.method==='GET'&&vectorBatchMatch[3]==='/files'){
+          const options={limit:Number(requestUrl.searchParams.get('limit')||20),order:requestUrl.searchParams.get('order')||'desc',after:requestUrl.searchParams.get('after')||undefined,before:requestUrl.searchParams.get('before')||undefined,filter:requestUrl.searchParams.get('filter')||undefined};
+          if([...requestUrl.searchParams.keys()].some(key=>!['limit','order','after','before','filter'].includes(key)))throw error(400,'向量库批次文件分页参数无效');return json(res,200,vectorStore.listBatchFiles(storeId,batchId,options));
+        }
+        if(req.method==='GET'&&!vectorBatchMatch[3])return json(res,200,vectorStore.getBatch(storeId,batchId));
+        if(req.method==='POST'&&vectorBatchMatch[3]==='/cancel')return json(res,200,vectorStore.cancelBatch(storeId,batchId));
+        throw error(405,'向量库批次资源不支持此方法');
+      }
+      const vectorChildMatch=/^\/v1\/vector_stores\/([^/]+)\/(files|file_batches|search)$/.exec(path);
+      if(vectorChildMatch){
+        let storeId;try{storeId=decodeURIComponent(vectorChildMatch[1]);}catch{throw error(400,'向量库 ID 编码无效');}
+        if(vectorChildMatch[2]==='files'){
+          if(req.method==='POST')return json(res,200,await vectorStore.attach(storeId,await readBody(req,config.requestLimit)));
+          if(req.method==='GET'){
+            const options={limit:Number(requestUrl.searchParams.get('limit')||20),order:requestUrl.searchParams.get('order')||'desc',after:requestUrl.searchParams.get('after')||undefined,before:requestUrl.searchParams.get('before')||undefined,filter:requestUrl.searchParams.get('filter')||undefined};
+            if([...requestUrl.searchParams.keys()].some(key=>!['limit','order','after','before','filter'].includes(key)))throw error(400,'向量库文件分页参数无效');return json(res,200,vectorStore.listFiles(storeId,options));
+          }
+        }
+        if(vectorChildMatch[2]==='file_batches'&&req.method==='POST')return json(res,200,await vectorStore.createBatch(storeId,await readBody(req,config.requestLimit)));
+        if(vectorChildMatch[2]==='search'&&req.method==='POST')return json(res,200,vectorStore.search(storeId,await readBody(req,config.requestLimit)));
+        throw error(405,'向量库子资源不支持此方法');
+      }
+      const vectorMatch=/^\/v1\/vector_stores\/([^/]+)$/.exec(path);
+      if(vectorMatch){
+        let storeId;try{storeId=decodeURIComponent(vectorMatch[1]);}catch{throw error(400,'向量库 ID 编码无效');}
+        if(req.method==='GET')return json(res,200,vectorStore.get(storeId));
+        if(req.method==='POST')return json(res,200,vectorStore.update(storeId,await readBody(req,config.requestLimit)));
+        if(req.method==='DELETE')return json(res,200,vectorStore.delete(storeId));
+        throw error(405,'向量库资源不支持此方法');
       }
       if(path==='/v1/batches'){
         if(req.method==='POST')return json(res,200,batchStore.create(await readBody(req,config.requestLimit)));
@@ -541,6 +594,8 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       rawInput=await expandInputFiles(path,rawInput,fileStore,{pdfMaxPages:config.pdfMaxPages??200});
       const media=extractImages(path,rawInput);
       const input = normalizeRequest(path,media.input);
+      const fileSearch=path==='/v1/responses'?vectorStore.responseSearch(media.input):null;
+      if(fileSearch)input.messages=[{role:'system',content:fileSearch.context},...input.messages];
       let previous;
       if(path==='/v1/responses'&&media.input.previous_response_id){previous=responseStore.get(media.input.previous_response_id);if(!['completed','incomplete'].includes(previous.response.status))throw error(409,'previous_response_id 尚未完成');input.messages=[...previous.messages,...input.messages];}
       const formatPolicy=outputPolicy(path,media.input);
@@ -548,7 +603,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const adapter = path === '/v1/responses'||path==='/v1/messages' ? new ProtocolOutput(path,input,async frame=>{
         if (!res.headersSent) res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
         await write(res,frame);
-      },media.input) : null;
+      },media.input,{fileSearchItem:fileSearch?.item}) : null;
       const policy = toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls);
       const catalogue = await models();
       if (!catalogue.length) throw error(503, '模型目录没有已确认的自部署国内模型');
@@ -718,6 +773,9 @@ export function startServer(config = configuration()) {
   if (!Number.isInteger(config.pdfMaxPages) || config.pdfMaxPages < 1 || config.pdfMaxPages > 2000) throw new Error('GENAI_PDF_MAX_PAGES 必须为 1–2000 的整数');
   if (!Number.isInteger(config.batchStoreSize) || config.batchStoreSize < 0 || config.batchStoreSize > 1000) throw new Error('GENAI_BATCH_STORE_SIZE 必须为 0–1000 的整数');
   if (!Number.isFinite(config.batchStoreTtl) || config.batchStoreTtl < 3600000 || config.batchStoreTtl > 2592000000) throw new Error('GENAI_BATCH_STORE_TTL_MS 必须为 1 小时–30 天');
+  if (!Number.isInteger(config.vectorStoreSize) || config.vectorStoreSize < 0 || config.vectorStoreSize > 1000) throw new Error('GENAI_VECTOR_STORE_SIZE 必须为 0–1000 的整数');
+  if (!Number.isFinite(config.vectorStoreTtl) || config.vectorStoreTtl < 3600000 || config.vectorStoreTtl > 31536000000) throw new Error('GENAI_VECTOR_STORE_TTL_MS 必须为 1 小时–365 天');
+  if (!Number.isInteger(config.vectorStoreMaxFiles) || config.vectorStoreMaxFiles < 1 || config.vectorStoreMaxFiles > 10000) throw new Error('GENAI_VECTOR_STORE_MAX_FILES 必须为 1–10000 的整数');
   if (!Number.isInteger(config.upstreamRetries) || config.upstreamRetries < 0 || config.upstreamRetries > 5) throw new Error('GENAI_UPSTREAM_RETRIES 必须为 0–5 的整数');
   if (config.corsOrigin && config.corsOrigin!=='*') { let origin;try{origin=new URL(config.corsOrigin);}catch{throw new Error('CORS_ORIGIN 必须是完整来源或 *');}if(origin.origin!==config.corsOrigin)throw new Error('CORS_ORIGIN 只能包含协议、主机和端口'); }
   const server=createServer(config);

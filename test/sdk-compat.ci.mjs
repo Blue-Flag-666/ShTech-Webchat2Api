@@ -53,6 +53,14 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     const completed=await client.uploads.complete(upload.id,{part_ids:[first.id,second.id]});assert.equal(completed.status,'completed');assert.equal(await (await client.files.content(completed.file.id)).text(),'chunked upload');
     const pdf=await client.files.create({file:new File([simplePdf('PDF attachment works')],'document.pdf',{type:'application/pdf'}),purpose:'user_data'});
     const pdfResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_file',file_id:pdf.id}]}],store:false});assert.equal(pdfResponse.output_text,'你好');
+    const knowledge=await client.files.create({file:new File(['Production deployment uses blue-green releases.'],'runbook.md',{type:'text/markdown'}),purpose:'assistants'});
+    const vectorStore=await client.vectorStores.create({name:'SDK knowledge',file_ids:[knowledge.id]});assert.equal(vectorStore.file_counts.completed,1);
+    assert.equal((await client.vectorStores.retrieve(vectorStore.id)).id,vectorStore.id);assert.equal((await client.vectorStores.list({limit:1})).data[0].id,vectorStore.id);
+    assert.equal((await client.vectorStores.files.list(vectorStore.id)).data[0].id,knowledge.id);
+    const search=await client.vectorStores.search(vectorStore.id,{query:'production deployment'});assert.equal(search.data[0].file_id,knowledge.id);
+    const searchedResponse=await client.responses.create({model:'qwen-instruct',input:'How is production deployed?',tools:[{type:'file_search',vector_store_ids:[vectorStore.id]}],include:['file_search_call.results'],store:false});
+    assert.equal(searchedResponse.output_text,'你好');assert.equal(searchedResponse.output[0].type,'file_search_call');assert.equal(searchedResponse.output[0].results[0].file_id,knowledge.id);
+    assert.equal((await client.vectorStores.delete(vectorStore.id)).deleted,true);
     const batchLine={custom_id:'sdk-batch-1',method:'POST',url:'/v1/responses',body:{model:'qwen-instruct',input:'批处理',store:false}};
     const batchInput=await client.files.create({file:new File([JSON.stringify(batchLine)],'requests.jsonl',{type:'application/jsonl'}),purpose:'batch'});
     let batch=await client.batches.create({input_file_id:batchInput.id,endpoint:'/v1/responses',completion_window:'24h'});
