@@ -242,6 +242,7 @@ test('Responses reasoning summary 与 Messages thinking 同时支持 JSON、SSE 
         const json=await response.json();
         if(path==='/v1/responses') {
           assert.equal(json.output[0].type,'reasoning');assert.equal(json.output[0].summary[0].text,'先思考');
+          assert.match(json.output[0].encrypted_content,/^enc_/);assert.equal(json.store,false);
           assert.equal(json.output[1].content[0].text,'后回答');
           const history=normalizeRequest(path,{input:[{type:'reasoning',summary:json.output[0].summary},{role:'assistant',content:json.output[1].content},{role:'user',content:'继续'}]});
           assert.match(history.messages[0].content,/先思考/);
@@ -255,7 +256,7 @@ test('Responses reasoning summary 与 Messages thinking 同时支持 JSON、SSE 
         const frames=(await Array.fromAsync(events(response.body))).map(x=>JSON.parse(x.data));
         if(path==='/v1/responses') {
           assert.equal(frames.filter(x=>x.type==='response.reasoning_summary_text.delta').map(x=>x.delta).join(''),'先思考');
-          assert.equal(frames.find(x=>x.type==='response.output_item.added').item.type,'reasoning');
+          const added=frames.find(x=>x.type==='response.output_item.added').item;assert.equal(added.type,'reasoning');assert.match(added.encrypted_content,/^enc_/);
           assert.deepEqual(frames.at(-1).response.output.map(x=>x.type),['reasoning','message']);
         } else {
           assert.equal(frames.find(x=>x.delta?.type==='thinking_delta').delta.thinking,'先思考');
@@ -264,4 +265,9 @@ test('Responses reasoning summary 与 Messages thinking 同时支持 JSON、SSE 
       }
     } finally {server.closeAllConnections();await new Promise(r=>server.close(r));}
   }
+});
+test('Responses 未指定 store 时默认保存',async()=>{
+  await fixture(async call=>{
+    const result=await(await call('/v1/responses',{input:'默认保存'})).json();assert.equal(result.store,true);
+  },'已保存');
 });

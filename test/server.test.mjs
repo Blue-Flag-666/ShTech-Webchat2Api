@@ -33,7 +33,7 @@ test('Responses 后台任务可轮询完成并保留输入项',async()=>{
   await withServer(async()=>{await gate;return new Response(sse([chunk('后台完成','stop')]),{headers:{'content-type':'text/event-stream'}});},async(_call,base)=>{
     const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
     const created=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',input:'长任务',background:true})})).json();
-    assert.equal(created.status,'queued');assert.equal(created.background,true);assert.equal(created.store,false);assert.match(created.id,/^resp_/);
+    assert.equal(created.status,'queued');assert.equal(created.background,true);assert.equal(created.store,true);assert.match(created.id,/^resp_/);
     const pending=await(await fetch(`${base}/v1/responses/${created.id}`,{headers})).json();assert.ok(['queued','in_progress'].includes(pending.status));
     release();let completed;
     for(let i=0;i<100;i++){completed=await(await fetch(`${base}/v1/responses/${created.id}`,{headers})).json();if(completed.status==='completed')break;await new Promise(resolve=>setTimeout(resolve,10));}
@@ -112,6 +112,44 @@ test('Responses compact 生成可续用状态并提供输入 token 计数',async
     const continued=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'kimi-k3',input:[...compacted.output,{type:'message',role:'user',content:'继续'}]})})).json();
     assert.equal(continued.output_text,'已继续');assert.equal(calls,2);
   },{modelFetcher});
+});
+test('Responses 默认保存 reasoning，并用 item_reference 续接 OpenCode 会话',async()=>{
+  let calls=0;
+  await withServer(async(_url,options)=>{
+    calls++;const body=JSON.parse(options.body);
+    if(calls===1){
+      const thought=chunk('');thought.choices[0].delta.reasoning_content='先检查项目结构';
+      return new Response(sse([thought,chunk('第一轮完成','stop')]),{headers:{'content-type':'text/event-stream'}});
+    }
+    assert.match(JSON.stringify(body.messages),/Reasoning summary/);assert.match(JSON.stringify(body.messages),/先检查项目结构/);
+    return new Response(sse([chunk('第二轮完成','stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async(_call,base)=>{
+    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
+    const first=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',input:'开始'})})).json();
+    assert.equal(first.store,true);const reasoning=first.output.find(item=>item.type==='reasoning');assert.match(reasoning.encrypted_content,/^enc_/);
+    assert.equal((await fetch(`${base}/v1/responses/${first.id}`,{headers})).status,200);
+    const second=await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',input:[{type:'item_reference',id:reasoning.id},{type:'message',role:'user',content:'继续'}]})});
+    assert.equal(second.status,200);assert.equal((await second.json()).output_text,'第二轮完成');assert.equal(calls,2);
+  });
+});
+test('Responses store false 返回可回放 reasoning，过期引用不会中断当前请求',async()=>{
+  let calls=0;
+  await withServer(async(_url,options)=>{
+    calls++;const body=JSON.parse(options.body);
+    if(calls===1){const thought=chunk('');thought.choices[0].delta.reasoning_content='无状态推理';return new Response(sse([thought,chunk('结果','stop')]),{headers:{'content-type':'text/event-stream'}});}
+    if(calls===2){assert.match(JSON.stringify(body.messages),/无状态推理/);return new Response(sse([chunk('已回放','stop')]),{headers:{'content-type':'text/event-stream'}});}
+    assert.doesNotMatch(JSON.stringify(body.messages),/rs_missing/);return new Response(sse([chunk('已恢复','stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async(_call,base)=>{
+    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
+    const first=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',input:'开始',store:false})})).json();
+    assert.equal(first.store,false);const reasoning=first.output.find(item=>item.type==='reasoning');assert.match(reasoning.encrypted_content,/^enc_/);
+    assert.equal((await fetch(`${base}/v1/responses/${first.id}`,{headers})).status,404);
+    const replay={...reasoning};delete replay.id;
+    const second=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',store:false,input:[replay,{type:'message',role:'user',content:'继续'}]})})).json();
+    assert.equal(second.output_text,'已回放');
+    const stale=await(await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',input:[{type:'item_reference',id:'rs_missing'},{type:'message',role:'user',content:'恢复'}]})})).json();
+    assert.equal(stale.output_text,'已恢复');assert.equal(calls,3);
+  });
 });
 test('转换当前输入与历史，保留配置', () => {
   const body = upstreamBody({...request,messages:[{role:'user',content:'旧问题'},{role:'assistant',content:'旧回答'},...request.messages]},config);

@@ -210,6 +210,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
   const responseStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000);
   const conversationStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'对话');
   const compactionStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'压缩状态');
+  const itemReferenceStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'响应项');
   const backgroundJobs=new Map();
   const backgroundStreams=new Map();
   function notifyBackground(log){log.version++;for(const notify of log.waiters)notify();log.waiters.clear();}
@@ -237,14 +238,24 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
   function appendConversation(id,items){
     if(!id)return;const value=conversationStore.get(id);value.items.push(...structuredClone(items));conversationStore.set(id,value);
   }
-  function expandCompactions(input){
+  function rememberResponseItems(response){
+    if(response?.store===false)return;
+    for(const item of response?.output||[])if(typeof item?.id==='string'&&item.id)itemReferenceStore.set(item.id,item);
+  }
+  function expandResponseState(input){
     if(!Array.isArray(input))return input;
     return input.map(item=>{
-      if(item?.type!=='compaction')return item;
-      if(typeof item.encrypted_content!=='string'||!item.encrypted_content)throw error(400,'compaction item 缺少 encrypted_content');
-      const value=compactionStore.get(item.encrypted_content);
-      return {id:item.id||`cmp_${randomUUID().replaceAll('-','')}`,type:'message',role:'developer',content:[{type:'input_text',text:`Compacted conversation state:\n${value.summary}`}]};
-    });
+      if(item?.type==='compaction'){
+        if(typeof item.encrypted_content!=='string'||!item.encrypted_content)throw error(400,'compaction item 缺少 encrypted_content');
+        const value=compactionStore.get(item.encrypted_content);
+        return {id:item.id||`cmp_${randomUUID().replaceAll('-','')}`,type:'message',role:'developer',content:[{type:'input_text',text:`Compacted conversation state:\n${value.summary}`}]};
+      }
+      if(item?.type==='item_reference'){
+        if(typeof item.id!=='string'||!item.id)throw error(400,'item_reference 缺少 id');
+        try{return itemReferenceStore.get(item.id);}catch(cause){if(cause?.status===404)return null;throw cause;}
+      }
+      return item;
+    }).filter(Boolean);
   }
   function truncateMessages(messages,threshold){
     if(!Number.isInteger(threshold)||threshold<1||estimateTokens(messages)<=threshold)return messages;
@@ -311,7 +322,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
           const stored=responseStore.get(id);
           stored.response=emitted.response;
           if(['response.completed','response.incomplete'].includes(item.event)){
-            terminal=emitted.response;stored.messages=[...job.messages,responseAssistant(terminal)];
+            terminal=emitted.response;stored.messages=[...job.messages,responseAssistant(terminal)];rememberResponseItems(terminal);
             appendConversation(job.conversationId,[...job.conversationItems,...terminal.output]);
           }
           responseStore.set(id,stored);
@@ -344,7 +355,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
       if (!config.key || !authorized(req, config.key, path)) throw error(401, '需要有效的本地 API Bearer 密钥');
-      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size });
+      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size,stored_items:itemReferenceStore.size });
       if(req.method==='POST'&&path==='/v1/conversations'){
         if(!(config.responseStoreSize??128))throw error(400,'Conversations 需要启用响应存储');
         const body=await readBody(req,config.requestLimit),id=`conv_${randomUUID().replaceAll('-','')}`;
@@ -432,7 +443,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
           value={...value,input:[...conversationStore.get(id).items,...responseInputItems(value)]};
         }
         if(value.previous_response_id){const previous=responseStore.get(value.previous_response_id);history=previous.messages;value={...value,input:responseInputItems(value)};}
-        value={...value,input:expandCompactions(value.input)};
+        value={...value,input:expandResponseState(value.input)};
         return json(res,200,{object:'response.input_tokens',input_tokens:estimateTokens(value)+estimateTokens(history)});
       }
       if(req.method==='POST'&&path==='/v1/responses/compact'){
@@ -453,7 +464,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       if (!tokenManager.configured) throw error(503, '请配置 GENAI_TOKEN 或 CAS 账号');
       let rawInput = await readBody(req,config.requestLimit);
       if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) throw error(400, '请求必须是 JSON 对象');
-      if(path==='/v1/responses')rawInput={...rawInput,input:expandCompactions(rawInput.input)};
+      if(path==='/v1/responses')rawInput={...rawInput,input:expandResponseState(rawInput.input)};
       let conversationId,conversationItems=[];
       if(path==='/v1/responses'&&rawInput.conversation!==undefined){
         if(rawInput.previous_response_id)throw error(400,'conversation 与 previous_response_id 不能同时使用');
@@ -486,7 +497,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       if(path==='/v1/responses'&&media.input.background===true){
         if(!(config.responseStoreSize??128))throw error(400,'background 模式需要启用响应存储');
         pruneBackground();
-        const backgroundRaw={...rawInput,conversation:undefined},queued=adapter.response([],'queued',null),inputItems=conversationId?conversationItems:responseInputItems(backgroundRaw),log={events:[],waiters:new Set(),done:false,version:0,nextSequence:0,expires:Date.now()+(config.responseStoreTtl??3600000)},job={controller:new AbortController(),deleted:false,terminal:false,messages:structuredClone(input.messages),inputItems,store:media.input.store===true,log,conversationId,conversationItems};
+        const backgroundRaw={...rawInput,conversation:undefined},queued=adapter.response([],'queued',null),inputItems=conversationId?conversationItems:responseInputItems(backgroundRaw),log={events:[],waiters:new Set(),done:false,version:0,nextSequence:0,expires:Date.now()+(config.responseStoreTtl??3600000)},job={controller:new AbortController(),deleted:false,terminal:false,messages:structuredClone(input.messages),inputItems,store:media.input.store!==false,log,conversationId,conversationItems};
         addBackgroundEvent(log,'response.queued',{response:queued});backgroundStreams.set(queued.id,log);pruneBackground();
         responseStore.set(queued.id,{response:queued,messages:job.messages,input_items:inputItems});backgroundJobs.set(queued.id,job);
         setImmediate(()=>void runBackground(queued.id,backgroundRaw,job));
@@ -579,8 +590,9 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const completion = { id: last.id || `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: last.created || Math.floor(Date.now()/1000), model: input.model || last.model || 'qwen-instruct', choices: [{ index: 0, message: { role: 'assistant', content: parsed.content, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls}:{}) }, finish_reason: finish }], usage: normalizedUsage };
       if (adapter) {
         const result = await adapter.finish(completion,input.stream);
+        if(path==='/v1/responses')rememberResponseItems(result);
         if(path==='/v1/responses'&&conversationId&&req.headers['x-shtech-internal-compact']!=='1')appendConversation(conversationId,[...conversationItems,...result.output]);
-        if(path==='/v1/responses'&&media.input.store===true){
+        if(path==='/v1/responses'&&media.input.store!==false){
           const assistant={role:'assistant',content:completion.choices[0].message.content,tool_calls:completion.choices[0].message.tool_calls};
           const inputItems=responseInputItems(media.input);
           responseStore.set(result.id,{response:result,messages:[...input.messages,assistant],input_items:inputItems});

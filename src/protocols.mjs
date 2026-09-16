@@ -141,6 +141,8 @@ export function normalizeRequest(path, input) {
         if (summary) out.messages.push({role:'assistant',content:`[Reasoning summary]\n${summary}`});
       } else if(item?.type==='web_search_call') {
         continue;
+      } else if(item?.type==='item_reference') {
+        continue;
       } else if(item?.type==='additional_tools') {
         if(item.role!=='developer'||!Array.isArray(item.tools)||!item.tools.length)throw bad('additional_tools 必须包含 developer tools');
         const added=responseTools(item.tools)||[];
@@ -241,6 +243,7 @@ export class ProtocolOutput {
     this.path=path; this.input=input; this.emit=emit; this.sequence=0;
     this.id=id(path === '/v1/responses' ? 'resp' : 'msg');
     this.messageId=id('msg'); this.reasoningId=id('rs'); this.created=Math.floor(Date.now()/1000);
+    this.reasoningEncryptedContent=`enc_${randomUUID().replaceAll('-','')}`;
     this.text=''; this.reasoning=''; this.started=false; this.textIndex=null; this.reasoningIndex=null; this.nextIndex=0;
     this.metadata=original.metadata || {};this.original=original;this.customTools=new Set();
     const collect=tools=>{for(const tool of tools || [])if(tool?.type==='namespace')collect(tool.tools);else if(tool?.type==='custom'&&typeof tool.name==='string')this.customTools.add(tool.name);};
@@ -255,7 +258,7 @@ export class ProtocolOutput {
     return {id:this.id,object:'response',created_at:this.created,status,error:null,
       completed_at:['completed','incomplete'].includes(status)?Math.floor(Date.now()/1000):null,
       incomplete_details:status === 'incomplete' ? {reason:'max_output_tokens'} : null,
-      model:this.input.model || 'qwen-instruct',output,usage,store:this.original.store===true,parallel_tool_calls:this.original.parallel_tool_calls ?? true,
+      model:this.input.model || 'qwen-instruct',output,usage,store:this.original.store!==false,parallel_tool_calls:this.original.parallel_tool_calls ?? true,
       tool_choice:this.original.tool_choice ?? 'auto',tools:this.original.tools || [],metadata:this.metadata,
       reasoning:{effort:this.original.reasoning?.effort??null,summary:this.reasoning? 'auto':null},output_text:outputText,
       instructions:this.original.instructions??null,max_output_tokens:this.original.max_output_tokens??null,
@@ -267,7 +270,7 @@ export class ProtocolOutput {
   }
   part(value) { return {type:'output_text',text:value,annotations:[],logprobs:[]}; }
   item(value,status='completed') { return {id:this.messageId,type:'message',status,role:'assistant',content:[this.part(value)]}; }
-  reasoningItem(status='completed') { return {id:this.reasoningId,type:'reasoning',status,summary:[{type:'summary_text',text:this.reasoning}],content:[],encrypted_content:null}; }
+  reasoningItem(status='completed') { return {id:this.reasoningId,type:'reasoning',status,summary:[{type:'summary_text',text:this.reasoning}],content:[],encrypted_content:this.reasoningEncryptedContent}; }
   async start() {
     if (this.started) return;
     this.started=true;
@@ -298,7 +301,7 @@ export class ProtocolOutput {
     if (this.reasoningIndex===null) {
       this.reasoningIndex=this.nextIndex++;
       if(response) {
-        await this.event('response.output_item.added',{output_index:this.reasoningIndex,item:{id:this.reasoningId,type:'reasoning',status:'in_progress',summary:[]}});
+        await this.event('response.output_item.added',{output_index:this.reasoningIndex,item:{id:this.reasoningId,type:'reasoning',status:'in_progress',summary:[],encrypted_content:this.reasoningEncryptedContent}});
         await this.event('response.reasoning_summary_part.added',{item_id:this.reasoningId,output_index:this.reasoningIndex,summary_index:0,part:{type:'summary_text',text:''}});
       } else await this.event('content_block_start',{index:this.reasoningIndex,content_block:{type:'thinking',thinking:'',signature:''}});
     }

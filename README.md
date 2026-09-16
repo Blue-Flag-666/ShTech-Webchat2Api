@@ -138,7 +138,7 @@ npm start
 
 工具由客户端执行，服务负责声明、解析、参数 Schema 校验和回传。Webchat 没有公开原生工具参数入口，因此工具及结构化输出通过提示词生成并在本地校验；上下文缓存、请求签名、Formula 工具和原生约束解码无法由该代理复刻。
 
-Chat 支持 `max_tokens`、`max_completion_tokens`、`stream_options.include_usage`、`tools`、`tool_choice`、`response_format`、常用采样参数和 `net_go`；Kimi K3 的采样参数按官方范围校验。Responses 支持进程内 `store:true`、`previous_response_id`、`conversation`、`background:true`、后台流式输出、按事件序号断线续传、Kimi 上下文压缩、输入 token 估算、`truncation:auto`、`context_management`、状态轮询、取消、读取、删除和输入项查询；Conversations 支持完整资源和对话项管理。状态默认保存一小时，服务重启后清空。
+Chat 支持 `max_tokens`、`max_completion_tokens`、`stream_options.include_usage`、`tools`、`tool_choice`、`response_format`、常用采样参数和 `net_go`；Kimi K3 的采样参数按官方范围校验。Responses 默认在进程内保存，支持 `item_reference`、`previous_response_id`、`conversation`、`background:true`、后台流式输出、按事件序号断线续传、Kimi 上下文压缩、输入 token 估算、`truncation:auto`、`context_management`、状态轮询、取消、读取、删除和输入项查询；`store:false` 会返回可回放的不透明 reasoning 数据，便于 OpenCode 继续多轮推理。Conversations 支持完整资源和对话项管理。状态默认保存一小时，服务重启后清空。
 
 图片支持 URL 和 Base64；程序会从学校公开网页自动读取上传凭据，`GENAI_UPLOAD_TOKEN` 只用于覆盖。Kimi K3 会被识别为视觉模型。Chat `web_search_options`、Responses `web_search` 和 Anthropic 服务端搜索工具会映射到 Webchat 的 `netGo`，搜索过程不会伪造原生工具事件。视频、音频、embeddings 和 reranker 尚未支持。请求默认按单并发排队，并对建立流之前的临时上游故障有限重试；并发、队列和重试次数均可通过 `.env` 调整。
 
