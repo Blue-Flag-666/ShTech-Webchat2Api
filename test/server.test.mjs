@@ -42,7 +42,7 @@ test('Responses 工具结果中的截图会上传给 Kimi 继续分析',async()=
     ];
     const response=await fetch(`${base}/v1/responses`,{method:'POST',headers,body:JSON.stringify({model:'kimi-k3',input,tools:[{type:'function',name:'browser',parameters:{type:'object'}}]})});
     assert.equal(response.status,200);assert.equal((await response.json()).output_text,'界面正常');
-  },{modelFetcher:async()=>({success:true,result:{records:[{aiType:'Kimi-k3',simpleName:'Kimi-K3',maxToken:800000,rootAiType:'xinference'}]}}),uploadToken:'upload-token',imageFetcher:async()=>new Response(JSON.stringify({success:true,result:{url:'screenshot.png',width:1,height:1}}),{headers:{'content-type':'application/json'}})});
+  },{modelFetcher:async()=>({success:true,result:{records:[{aiType:'Kimi-k3',simpleName:'Kimi-K3',maxToken:800000,rootAiType:'xinference'}]}}),uploadToken:'screenshot-upload-token',imageFetcher:async()=>new Response(JSON.stringify({success:true,result:{url:'screenshot.png',width:1,height:1}}),{headers:{'content-type':'application/json'}})});
 });
 
 test('Responses 后台任务可轮询完成并保留输入项',async()=>{
