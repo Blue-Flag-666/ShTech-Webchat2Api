@@ -26,7 +26,18 @@ jobs:
           node-version: '26.8.2'
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: node --test
+      - name: Unit tests
+        shell: bash
+        run: |
+          set +e
+          node --test > test-output.txt 2>&1
+          status=$?
+          cat test-output.txt
+          if [ "$status" -ne 0 ]; then
+            details=$(grep -E -A 24 -B 4 'not ok|AssertionError|ERR_' test-output.txt | tail -c 6000 | tr '\r\n' '  ' | sed 's/%/%25/g')
+            echo "::error title=Unit test details::$details"
+          fi
+          exit "$status"
       - run: npm run test:sdk
   image-test:
     needs: test
