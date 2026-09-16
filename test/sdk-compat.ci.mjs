@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { generateText, jsonSchema, stepCountIs, streamText, tool } from 'ai';
 import { createServer } from '../src/server.mjs';
 import { listenForFetch, confirmedModels } from './fixtures.mjs';
 
@@ -48,4 +50,24 @@ test('最新版 Anthropic SDK 调用 Messages 的 JSON/SSE',async()=>{
     let text='';for await(const event of stream)if(event.type==='content_block_delta'&&event.delta.type==='text_delta')text+=event.delta.text;
     assert.equal(text,'你好');
   });
+});
+
+test('最新版 Vercel AI SDK/OpenAI Compatible 可执行 OpenCode 风格工具循环与流式文本',async()=>{
+  let calls=0;
+  const server=createServer({key:'test',token:'token',group:'g',timeout:5000},async(_,options)=>{
+    calls++;
+    const body=JSON.parse(options.body);
+    const answer=calls===1
+      ? '<api_tool_call>{"name":"weather","arguments":{"city":"上海"}}</api_tool_call>'
+      : calls===2?'工具结果已收到':'流式正常';
+    return new Response(`data: ${JSON.stringify({id:`chatcmpl_ai_${calls}`,model:'kimi-k3',choices:[{index:0,delta:{content:answer},finish_reason:'stop'}]})}\n\n`,{headers:{'content-type':'text/event-stream'}});
+  },async()=>({success:true,result:{records:[{aiType:'Kimi-k3',simpleName:'Kimi-K3',maxToken:800000,rootAiType:'xinference'}]}}));
+  await listenForFetch(server);
+  try {
+    const provider=createOpenAICompatible({name:'shtech',apiKey:'test',baseURL:`http://127.0.0.1:${server.address().port}/v1`,includeUsage:true});
+    const model=provider.languageModel('kimi-k3');
+    const result=await generateText({model,prompt:'上海天气',tools:{weather:tool({description:'查询天气',inputSchema:jsonSchema({type:'object',properties:{city:{type:'string'}},required:['city'],additionalProperties:false}),execute:async({city})=>({city,weather:'晴'})})},stopWhen:stepCountIs(2)});
+    assert.equal(result.text,'工具结果已收到');assert.equal(calls,2);
+    const streamed=streamText({model,prompt:'测试流式'});assert.equal(await streamed.text,'流式正常');assert.equal(calls,3);
+  } finally { server.closeAllConnections();await new Promise(resolve=>server.close(resolve)); }
 });

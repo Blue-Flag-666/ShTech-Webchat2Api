@@ -42,3 +42,9 @@ test('custom 工具只接受 input 自由文本参数',()=>{
   assert.equal(parseToolCalls('<api_tool_call>{"name":"patch","arguments":{"input":"diff"}}</api_tool_call>',custom,()=> 'call_x').tool_calls.length,1);
   assert.throws(()=>parseToolCalls('<api_tool_call>{"name":"patch","arguments":{}}</api_tool_call>',custom,()=> 'call_x'),/custom/);
 });
+test('Kimi 历史保留 reasoning_content、partial 和动态工具声明',()=>{
+  const dynamic=[{type:'function',function:{name:'weather',parameters:{type:'object'}}}];
+  const result=normalizeMessages([{role:'system',tools:dynamic},{role:'user',content:'问题'},{role:'assistant',content:'前缀',reasoning_content:'思考',partial:true}],toolPolicy(dynamic));
+  assert.match(result[0].content,/Dynamic tool declarations/);assert.equal(result.at(-1).reasoning_content,'思考');assert.equal(result.at(-1).partial,true);
+  assert.throws(()=>normalizeMessages([{role:'assistant',content:'x',partial:true},{role:'user',content:'y'}],null),/partial/);
+});

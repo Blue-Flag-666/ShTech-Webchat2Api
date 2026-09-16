@@ -25,11 +25,13 @@ export function modelDirectory(records) {
     if(/qwen.*(?:instruct|3\.5)/.test(description)){aliases.add('qwen-instruct');if(/3\.5/.test(description))aliases.add('qwen3.5-397b-a17b');}
     if(/(?:chat)?glm.*5\.1/.test(description)){aliases.add('glm-5.1');aliases.add('chatglm');}
     if(/minimax.*m1/.test(description))aliases.add('minimax-m1');
-    const capabilities={text:true,vision:/(?:vl|vision|视觉|ocr)|glm.*4v/.test(description)||aliases.has('qwen-instruct'),tools:'emulated',reasoning:/r1|reason|thinking|qwq|qwen3\.5|minimax.*m1/.test(description)};
+    const kimiK3=/kimi[-_ ]?k3/.test(description);
+    if(kimiK3)aliases.add('kimi-k3');
+    const capabilities={text:true,vision:kimiK3||/(?:vl|vision|视觉|ocr)|glm.*4v/.test(description)||aliases.has('qwen-instruct'),tools:'emulated',reasoning:kimiK3||/r1|reason|thinking|qwq|qwen3\.5|minimax.*m1/.test(description),partial:kimiK3};
     for(const id of aliases) if(!result.has(id))result.set(id,{
       id,object:'model',created:0,owned_by:'shanghaitech',root_ai_type:record.rootAiType,
       upstream_id:record.aiType,capabilities,
-      ...(Number.isInteger(record.maxToken)&&record.maxToken>0?{max_tokens:record.maxToken}:{}),
+      ...(Number.isInteger(record.maxToken)&&record.maxToken>0?{max_tokens:record.maxToken,context_window:record.maxToken}:{}),
     });
   }
   return [...result.values()];

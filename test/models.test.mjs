@@ -18,3 +18,9 @@ test('为已发现的国内模型添加真实上游别名和能力',()=>{
   assert.equal(models.find(x=>x.id==='qwen3-coder').upstream_id,'qwen-code');
   assert.ok(models.every(x=>x.root_ai_type==='xinference'));
 });
+test('Kimi K3 暴露稳定别名、学校上下文和原生能力',()=>{
+  const models=modelDirectory([{aiType:'Kimi-k3',simpleName:'Kimi-K3',descInfo:'国产最先进2.8万亿参数大模型',maxToken:800000,rootAiType:'xinference'}]);
+  const model=models.find(x=>x.id==='kimi-k3');
+  assert.equal(model.upstream_id,'Kimi-k3');assert.equal(model.context_window,800000);assert.equal(model.max_tokens,800000);
+  assert.deepEqual(model.capabilities,{text:true,vision:true,tools:'emulated',reasoning:true,partial:true});
+});

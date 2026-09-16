@@ -1,6 +1,6 @@
 # 上海科技大学 Webchat API
 
-将 `genai.shanghaitech.edu.cn` Webchat 转换为兼容 OpenAI Chat Completions、Responses 和 Anthropic Messages 的本地 API。支持 SSE、工具调用、结构化输出、CAS 自动登录，并只暴露学校部署的国内 Xinference 模型。
+将 `genai.shanghaitech.edu.cn` Webchat 转换为兼容 OpenAI Chat Completions、Responses 和 Anthropic Messages 的本地 API。重点适配学校部署的 Kimi K3，供 OpenCode、Codex 和其他代码 Agent 使用；同时只暴露国内 Xinference 模型。
 
 ## 快速使用
 
@@ -25,7 +25,32 @@ chmod +x shtech-webchat2api-linux-x64
 ```text
 Base URL: http://127.0.0.1:8787/v1
 API Key:  首次启动时显示并写入 .env 的 API_KEY
-Model:    qwen-instruct，或通过 GET /v1/models 查询
+Model:    kimi-k3，或通过 GET /v1/models 查询
+```
+
+OpenCode 在项目或用户配置 `opencode.json` 中填写：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "shtech/kimi-k3",
+  "provider": {
+    "shtech": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "ShanghaiTech Kimi",
+      "options": {
+        "baseURL": "http://127.0.0.1:8787/v1",
+        "apiKey": "复制 .env 中的 API_KEY"
+      },
+      "models": {
+        "kimi-k3": {
+          "name": "Kimi K3",
+          "limit": { "context": 800000, "output": 131072 }
+        }
+      }
+    }
+  }
+}
 ```
 
 重新配置可在终端运行：
@@ -106,11 +131,13 @@ npm start
 
 本地鉴权同时接受 `Authorization: Bearer`、`x-api-key` 和 `api-key`。
 
-三个聊天接口均支持流式与非流式文本、工具调用、推理摘要、图片输入和 JSON/JSON Schema 输出。工具由客户端执行，服务负责声明、解析、参数 Schema 校验和回传。工具及结构化输出通过提示词生成并在本地校验，不是上游原生约束解码。
+三个聊天接口均支持流式与非流式文本、工具调用、推理摘要、图片输入和 JSON/JSON Schema 输出。Kimi K3 额外兼容 `reasoning_effort=max`、历史 `reasoning_content`、Partial Mode、动态工具、学校目录中的 800K 上下文限制，以及 Moonshot 的 `/v1/tokenizers/estimate-token-count` 和 `/anthropic/v1/messages` 路径。
+
+工具由客户端执行，服务负责声明、解析、参数 Schema 校验和回传。Webchat 没有公开原生工具参数入口，因此工具及结构化输出通过提示词生成并在本地校验；上下文缓存、请求签名、Formula 工具和原生约束解码无法由该代理复刻。
 
 Chat 支持 `max_tokens`、`max_completion_tokens`、`stream_options.include_usage`、`tools`、`tool_choice`、`response_format`、常用采样参数和 `net_go`。Responses 支持进程内 `store:true`、`previous_response_id`、读取、删除和输入项查询；默认保存一小时，服务重启后清空。
 
-图片支持 URL 和 Base64，需配置 `GENAI_UPLOAD_TOKEN`，并且只允许模型目录中标记为视觉能力的国内 Xinference 模型。Chat `web_search_options`、Responses `web_search` 和 Anthropic 服务端搜索工具会映射到 Webchat 的 `netGo`，搜索过程不会伪造原生工具事件。音频、视频、embeddings 和 reranker 尚未支持。请求默认按单并发排队，并对建立流之前的临时上游故障有限重试；并发、队列和重试次数均可通过 `.env` 调整。
+图片支持 URL 和 Base64，需配置 `GENAI_UPLOAD_TOKEN`；Kimi K3 会被识别为视觉模型。Chat `web_search_options`、Responses `web_search` 和 Anthropic 服务端搜索工具会映射到 Webchat 的 `netGo`，搜索过程不会伪造原生工具事件。视频、音频、embeddings 和 reranker 尚未支持。请求默认按单并发排队，并对建立流之前的临时上游故障有限重试；并发、队列和重试次数均可通过 `.env` 调整。
 
 ## 登录与验证
 

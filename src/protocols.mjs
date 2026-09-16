@@ -87,11 +87,24 @@ export function normalizeRequest(path, input) {
       if(out.tool_choice!==undefined)throw bad('function_call 与 tool_choice 不能同时使用');
       out.tool_choice=typeof out.function_call==='object'?{type:'function',function:{name:out.function_call.name}}:out.function_call==='none'?'none':'auto';delete out.function_call;
     }
+    if(Array.isArray(out.messages)){
+      const merged=[...(out.tools||[])],byName=new Map(merged.map(tool=>[tool?.function?.name,tool]));
+      for(const message of out.messages)if(message?.tools!==undefined){
+        if(message.role!=='system'||message.content!=null||!Array.isArray(message.tools)||!message.tools.length)throw bad('动态 tools 仅适用于无 content 的 system 消息');
+        for(const tool of message.tools){
+          if(tool?.type!=='function'||typeof tool.function?.name!=='string')throw bad('动态工具必须是 function');
+          const previous=byName.get(tool.function.name);
+          if(previous&&JSON.stringify(previous)!==JSON.stringify(tool))throw bad(`工具 ${tool.function.name} 重复定义`);
+          if(!previous){merged.push(tool);byName.set(tool.function.name,tool);}
+        }
+      }
+      if(merged.length)out.tools=merged;
+    }
     return out;
   }
   const out = { model: input.model, stream: input.stream, messages: [] };
   if (path === '/v1/responses') {
-    keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning','text','parallel_tool_calls','include','temperature','top_p','service_tier','safety_identifier','prompt_cache_key','user']);
+    keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning','text','parallel_tool_calls','include','temperature','top_p','service_tier','safety_identifier','prompt_cache_key','user','background']);
     if (input.store !== undefined && typeof input.store !== 'boolean') throw bad('store 必须为布尔值');
     if (input.previous_response_id !== undefined && (typeof input.previous_response_id!=='string'||!input.previous_response_id)) throw bad('previous_response_id 必须是非空字符串');
     if (input.instructions != null) out.messages.push({role:'system',content:text(input.instructions)});
@@ -99,9 +112,16 @@ export function normalizeRequest(path, input) {
     if (!Array.isArray(items)) throw bad('input 必须为字符串或输入项数组');
     for (const item of items) {
       if (item?.type === 'reasoning') {
-        if (!Array.isArray(item.summary)) throw bad('reasoning.summary 必须为数组');
-        const summary=text(item.summary,['summary_text']);
+        const source=Array.isArray(item.content)&&item.content.length?item.content:item.summary;
+        if (!Array.isArray(source)) throw bad('reasoning.content 或 reasoning.summary 必须为数组');
+        const summary=text(source,['reasoning_text','summary_text']);
         if (summary) out.messages.push({role:'assistant',content:`[Reasoning summary]\n${summary}`});
+      } else if(item?.type==='web_search_call') {
+        continue;
+      } else if(item?.type==='additional_tools') {
+        if(item.role!=='developer'||!Array.isArray(item.tools)||!item.tools.length)throw bad('additional_tools 必须包含 developer tools');
+        const added=responseTools(item.tools)||[];
+        out.tools=[...(out.tools||[]),...added];
       } else if (item?.type === 'function_call') {
         const call = {id:item.call_id,type:'function',function:{name:item.name,arguments:item.arguments}};
         const previous = out.messages.at(-1);
@@ -117,19 +137,19 @@ export function normalizeRequest(path, input) {
       else if (item && (!item.type || item.type === 'message')) out.messages.push({role:item.role,content:text(item.content)});
       else throw bad('不支持的 Responses 输入项');
     }
-    const normalizedTools=responseTools(input.tools);
+    const normalizedTools=[...(out.tools||[]),...(responseTools(input.tools)||[])];
     const webSearch=Array.isArray(input.tools)&&input.tools.some(tool=>['web_search','web_search_preview'].includes(tool?.type));
     const selected=responseToolChoice(input.tool_choice,normalizedTools);
     out.tools=selected.tools;out.tool_choice=selected.choice;
     out.net_go=webSearch;
     if (input.parallel_tool_calls!==undefined && typeof input.parallel_tool_calls!=='boolean') throw bad('parallel_tool_calls 必须为布尔值');
-    if (input.include!==undefined && (!Array.isArray(input.include) || input.include.some(value=>value!=='reasoning.encrypted_content'))) throw bad('当前 include 仅接受 reasoning.encrypted_content');
+    if (input.include!==undefined && (!Array.isArray(input.include) || input.include.some(value=>!['reasoning.encrypted_content','web_search_call.results','web_search_call.action.sources'].includes(value)))) throw bad('include 包含不支持的字段');
     out.parallel_tool_calls=input.parallel_tool_calls;
     out.max_tokens = input.max_output_tokens;
     out.temperature=input.temperature;out.top_p=input.top_p;out.service_tier=input.service_tier;out.user=input.user;
     if(input.reasoning!==undefined){
       if(!input.reasoning||typeof input.reasoning!=='object'||Array.isArray(input.reasoning))throw bad('reasoning 必须是对象');
-      if(input.reasoning.effort!==undefined&&!['none','minimal','low','medium','high','xhigh'].includes(input.reasoning.effort))throw bad('reasoning.effort 无效');
+      if(input.reasoning.effort!==undefined&&!['none','minimal','low','medium','high','xhigh','max'].includes(input.reasoning.effort))throw bad('reasoning.effort 无效');
       out.reasoning_effort=input.reasoning.effort;
     }
     if(input.text?.verbosity!==undefined)out.verbosity=input.text.verbosity;
@@ -144,10 +164,14 @@ export function normalizeRequest(path, input) {
       if(input.thinking.budget_tokens!==undefined&&(!Number.isInteger(input.thinking.budget_tokens)||input.thinking.budget_tokens<1))throw bad('thinking.budget_tokens 必须为正整数');
       if(input.thinking.type!=='disabled')out.reasoning_effort=input.thinking.type==='adaptive'?'medium':'high';
     }
+    if(input.output_config?.effort!==undefined){
+      if(!['low','high','max'].includes(input.output_config.effort))throw bad('output_config.effort 无效');
+      out.reasoning_effort=input.output_config.effort;
+    }
     if (!Array.isArray(input.messages)) throw bad('messages 必须为数组');
-    for (const message of input.messages) {
+    for (const [messageIndex,message] of input.messages.entries()) {
       if (!['user','assistant'].includes(message?.role)) throw bad('Messages 仅接受 user/assistant 历史');
-      if (typeof message.content === 'string') { out.messages.push({...message}); continue; }
+      if (typeof message.content === 'string') { out.messages.push({...message,...(message.role==='assistant'&&messageIndex===input.messages.length-1?{partial:true}:{})}); continue; }
       if (!Array.isArray(message.content)) throw bad('content 必须为字符串或数组');
       const m = {role:message.role,content:''}, results = [];
       for (const block of message.content) {
@@ -160,7 +184,7 @@ export function normalizeRequest(path, input) {
         } else throw bad('不支持的 Messages 内容块');
       }
       out.messages.push(...results);
-      if (m.content || m.tool_calls || !results.length) out.messages.push(m);
+      if (m.content || m.tool_calls || !results.length) out.messages.push({...m,...(message.role==='assistant'&&messageIndex===input.messages.length-1?{partial:true}:{})});
     }
     if (input.tools !== undefined) {
       if (!Array.isArray(input.tools)) throw bad('tools 必须为数组');
@@ -206,12 +230,14 @@ export class ProtocolOutput {
   response(output=[],status='in_progress',usage=null) {
     const outputText=output.filter(item=>item?.type==='message').flatMap(item=>item.content||[]).filter(part=>part?.type==='output_text').map(part=>part.text||'').join('');
     return {id:this.id,object:'response',created_at:this.created,status,error:null,
+      completed_at:['completed','incomplete'].includes(status)?Math.floor(Date.now()/1000):null,
       incomplete_details:status === 'incomplete' ? {reason:'max_output_tokens'} : null,
       model:this.input.model || 'qwen-instruct',output,usage,store:this.original.store===true,parallel_tool_calls:this.original.parallel_tool_calls ?? true,
       tool_choice:this.original.tool_choice ?? 'auto',tools:this.original.tools || [],metadata:this.metadata,
       reasoning:{effort:this.original.reasoning?.effort??null,summary:this.reasoning? 'auto':null},output_text:outputText,
       instructions:this.original.instructions??null,max_output_tokens:this.original.max_output_tokens??null,
-      temperature:this.original.temperature??null,top_p:this.original.top_p??null,previous_response_id:this.original.previous_response_id??null};
+      text:this.original.text??null,temperature:this.original.temperature??null,top_p:this.original.top_p??null,
+      previous_response_id:this.original.previous_response_id??null,background:false,conversation:null,service_tier:this.original.service_tier??null};
   }
   message(content=[],stop_reason=null,usage={input_tokens:0,output_tokens:0}) {
     return {id:this.id,type:'message',role:'assistant',model:this.input.model || 'qwen-instruct',content,stop_reason,stop_sequence:null,usage:{cache_creation_input_tokens:0,cache_read_input_tokens:0,...usage}};
@@ -272,7 +298,7 @@ export class ProtocolOutput {
     let output=[];
     if(!stream) output=[...(this.reasoning?[reasoningItem]:[]),...(message.content?[messageItem]:[]),...callItems];
     const result=response ? this.response(output,limited?'incomplete':'completed',usage)
-      : this.message(output,calls.length?'tool_use':limited?'max_tokens':'end_turn',{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens});
+      : this.message(output,calls.length?'tool_use':limited?'max_tokens':'end_turn',{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,output_tokens_details:{thinking_tokens:usage.output_tokens_details?.reasoning_tokens||0}});
     if (!stream) return result;
     await this.start();
     if (this.reasoningIndex===null && this.reasoning) { const value=this.reasoning;this.reasoning='';await this.reasoningDelta(value); }
@@ -314,7 +340,7 @@ export class ProtocolOutput {
     if(response) Object.assign(result,{output,output_text:message.content||''}); else Object.assign(result,{content:output});
     if (response) await this.event(limited?'response.incomplete':'response.completed',{response:result});
     else {
-      await this.event('message_delta',{delta:{stop_reason:result.stop_reason,stop_sequence:null},usage:{output_tokens:usage.output_tokens}});
+      await this.event('message_delta',{delta:{stop_reason:result.stop_reason,stop_sequence:null},usage:{output_tokens:usage.output_tokens,output_tokens_details:{thinking_tokens:usage.output_tokens_details?.reasoning_tokens||0}}});
       await this.event('message_stop');
     }
     return result;

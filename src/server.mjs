@@ -31,7 +31,9 @@ export function upstreamBody(input, config, supportedModels, formatPolicy=null,m
   const selected = allowed.find(x => (typeof x === 'string' ? x : x.id) === (input.model ?? 'qwen-instruct'));
   if (!selected) throw error(400, `模型不可用：${input.model}`);
   const messages = normalizeMessages(input.messages, toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls));
-  if (messages.at(-1).role !== 'user') throw error(400, '最后一条消息必须为 user 或工具结果');
+  const partial=messages.at(-1).role==='assistant'&&messages.at(-1).partial===true;
+  const dynamicTail=messages.at(-1).role==='system'&&messages.at(-1).dynamic===true&&messages.some(message=>message.role==='user');
+  if (messages.at(-1).role !== 'user'&&!partial&&!dynamicTail) throw error(400, '最后一条消息必须为 user、工具结果、动态工具或 partial assistant');
   for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','max_completion_tokens','chat_group_id','net_go','tools','tool_choice','response_format','parallel_tool_calls','stream_options','temperature','top_p','top_k','min_p','presence_penalty','frequency_penalty','repetition_penalty','stop','seed','n','logprobs','top_logprobs','user','service_tier','reasoning_effort','verbosity'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
   if (input.stream !== undefined && typeof input.stream !== 'boolean') throw error(400, 'stream 必须是布尔值');
   if (input.net_go !== undefined && typeof input.net_go !== 'boolean') throw error(400, 'net_go 必须是布尔值');
@@ -47,20 +49,28 @@ export function upstreamBody(input, config, supportedModels, formatPolicy=null,m
   if(input.n!==undefined&&input.n!==1)throw error(400,'当前 n 仅支持 1');
   if(input.logprobs!==undefined&&input.logprobs!==false)throw error(400,'当前不支持 logprobs=true');
   if(input.top_logprobs!==undefined&&input.top_logprobs!==0)throw error(400,'当前不支持 top_logprobs');
-  if(input.reasoning_effort!==undefined&&!['none','minimal','low','medium','high','xhigh'].includes(input.reasoning_effort))throw error(400,'reasoning_effort 无效');
+  if(input.reasoning_effort!==undefined&&!['none','minimal','low','medium','high','xhigh','max'].includes(input.reasoning_effort))throw error(400,'reasoning_effort 无效');
   if(input.verbosity!==undefined&&!['low','medium','high'].includes(input.verbosity))throw error(400,'verbosity 无效');
   if(input.stop!==undefined&&typeof input.stop!=='string'&&(!Array.isArray(input.stop)||input.stop.some(x=>typeof x!=='string')))throw error(400,'stop 必须是字符串或字符串数组');
   if(input.stream_options!==undefined) {
     if(!input.stream || !input.stream_options || typeof input.stream_options!=='object' || Array.isArray(input.stream_options) || Object.keys(input.stream_options).some(key=>key!=='include_usage') || typeof input.stream_options.include_usage!=='boolean') throw error(400,'stream_options 仅支持流式 include_usage 布尔值');
   }
-  const max = input.max_tokens ?? input.max_completion_tokens ?? 16384;
-  if (!Number.isInteger(max) || max < 1 || max > 16384) throw error(400, 'max_tokens 必须是 1–16384 的整数');
+  const selectedId=typeof selected==='string'?selected:[selected.id,selected.upstream_id].filter(Boolean).join(' ');
+  const kimiK3=/kimi[-_ ]?k3/i.test(selectedId);
+  const modelLimit=typeof selected==='object'&&Number.isInteger(selected.max_tokens)&&selected.max_tokens>0?selected.max_tokens:16384;
+  const max = input.max_tokens ?? input.max_completion_tokens ?? (kimiK3?Math.min(131072,modelLimit):Math.min(16384,modelLimit));
+  if (!Number.isInteger(max) || max < 1 || max > modelLimit) throw error(400, `max_tokens 必须是 1–${modelLimit} 的整数`);
   const group = input.chat_group_id ?? config.group;
   if (typeof group !== 'string') throw error(400, 'chat_group_id 必须是字符串');
-  const behavior=[input.reasoning_effort&&input.reasoning_effort!=='none'?`Use ${input.reasoning_effort} reasoning effort.`:'',input.verbosity?`Use ${input.verbosity} response verbosity.`:''].filter(Boolean).join(' ');
+  const requestedEffort=input.reasoning_effort??(kimiK3?'max':undefined);
+  const effectiveEffort=kimiK3?({none:'low',minimal:'low',medium:'high',xhigh:'max'}[requestedEffort]||requestedEffort):requestedEffort;
+  const behavior=[effectiveEffort&&effectiveEffort!=='none'?`Use ${effectiveEffort} reasoning effort.`:'',input.verbosity?`Use ${input.verbosity} response verbosity.`:'',partial?'Continue from the final assistant prefix. Return only the new continuation; do not repeat the prefix.':'',dynamicTail?'Answer the most recent user request using the dynamically loaded tools when appropriate.':''].filter(Boolean).join(' ');
   const instructions=[behavior,toolPrompt(toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls)),outputPrompt(formatPolicy)].filter(Boolean).join('\n\n');
-  const chatInfo=instructions ? `${instructions}\n\nUser request:\n${messages.at(-1).content}` : messages.at(-1).content;
-  return { chatInfo, messages: messages.slice(0, -1),
+  const chatInfo=partial?(instructions||'Continue from the final assistant prefix and return only the continuation.')
+    :dynamicTail?(instructions||'Answer the most recent user request using the dynamically loaded tools when appropriate.')
+    :(instructions ? `${instructions}\n\nUser request:\n${messages.at(-1).content}` : messages.at(-1).content);
+  const history=(partial||dynamicTail?messages:messages.slice(0,-1)).map(({partial,dynamic,...message})=>message);
+  return { chatInfo, messages:history,
     type: '3', stream: true, aiType: selected.upstream_id || input.model || 'qwen-instruct', aiSecType: '1',
     ...(group.trim()?{chatGroupId:group}:{}),promptTokens: 0, imageUrl: '', imageUrls: [], width: '', height: '',
     rootAiType: selected.root_ai_type || 'xinference', maxToken: max, netGo: input.net_go ?? config.netGo,...media,
@@ -111,6 +121,14 @@ function chatUsage(value,promptEstimate,completionEstimate) {
   const completion_tokens=count('completion_tokens','output_tokens') ?? completionEstimate;
   const total_tokens=count('total_tokens') ?? prompt_tokens+completion_tokens;
   return {...(value || {}),prompt_tokens,completion_tokens,total_tokens};
+}
+function estimateTokens(value) {
+  let images=0;
+  const serialized=JSON.stringify(value,(_key,item)=>{
+    if(typeof item==='string'&&/^data:image\//i.test(item)){images++;return '[image]';}
+    return item;
+  });
+  return Math.ceil(Buffer.byteLength(serialized||'')/3)+images*1024;
 }
 async function readBody(req,limit=144*1024*1024) {
   let size = 0; const parts = [];
@@ -205,6 +223,8 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     let controller, timer, release, path=req.url;
     try {
       path=new URL(req.url,'http://localhost').pathname;
+      if(path==='/anthropic/v1/messages')path='/v1/messages';
+      if(path==='/anthropic/v1/messages/count_tokens')path='/v1/messages/count_tokens';
       const origin=req.headers.origin,allowed=config.corsOrigin==='*'||config.corsOrigin&&origin===config.corsOrigin;
       if(allowed){res.setHeader('Access-Control-Allow-Origin',config.corsOrigin==='*'?'*':origin);res.setHeader('Access-Control-Expose-Headers','X-Usage-Source, Retry-After');res.setHeader('Vary','Origin');}
       if(req.method==='OPTIONS'){
@@ -235,7 +255,13 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if(req.method==='POST'&&path==='/v1/messages/count_tokens'){
         const value=await readBody(req,config.requestLimit);if(!value||typeof value!=='object'||Array.isArray(value))throw error(400,'请求必须是 JSON 对象');
-        return json(res,200,{input_tokens:Math.ceil(Buffer.byteLength(JSON.stringify(value))/3)});
+        return json(res,200,{input_tokens:estimateTokens(value)});
+      }
+      if(req.method==='POST'&&path==='/v1/tokenizers/estimate-token-count'){
+        const value=await readBody(req,config.requestLimit);if(!value||typeof value!=='object'||Array.isArray(value))throw error(400,'请求必须是 JSON 对象');
+        if(typeof value.model!=='string'||!Array.isArray(value.messages)||!value.messages.length)throw error(400,'model 和非空 messages 为必填项');
+        const catalogue=await models();if(!catalogue.some(model=>model.id===value.model))throw error(400,`模型不可用：${value.model}`);
+        return json(res,200,{data:{total_tokens:estimateTokens(value)}});
       }
       if (req.method !== 'POST' || !['/v1/chat/completions','/v1/completions','/v1/responses','/v1/messages'].includes(path)) throw error(404, '接口不存在');
       if (!tokenManager.configured) throw error(503, '请配置 GENAI_TOKEN 或 CAS 账号');

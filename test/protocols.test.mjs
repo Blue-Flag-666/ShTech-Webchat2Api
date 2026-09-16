@@ -135,6 +135,23 @@ test('Chat 兼容旧版 functions/function_call，Responses 接受常用选项',
 test('Responses reasoning 与 Anthropic thinking 转成推理强度',()=>{
   assert.equal(normalizeRequest('/v1/responses',{input:'x',reasoning:{effort:'high'}}).reasoning_effort,'high');
   assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,thinking:{type:'enabled',budget_tokens:16}}).reasoning_effort,'high');
+  assert.equal(normalizeRequest('/v1/responses',{input:'x',reasoning:{effort:'max'}}).reasoning_effort,'max');
+  assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,output_config:{effort:'max'}}).reasoning_effort,'max');
+});
+test('Kimi 动态工具、Responses additional_tools 与 reasoning content 可回放',()=>{
+  const tool={type:'function',function:{name:'calculate',description:'计算',parameters:{type:'object'}}};
+  const chat=normalizeRequest('/v1/chat/completions',{model:'kimi-k3',messages:[{role:'user',content:'算数'},{role:'system',tools:[tool]}]});
+  assert.equal(chat.tools[0].function.name,'calculate');assert.deepEqual(chat.messages[1].tools,[tool]);
+  const responses=normalizeRequest('/v1/responses',{model:'kimi-k3',input:[
+    {type:'reasoning',content:[{type:'reasoning_text',text:'保留思路'}]},
+    {type:'additional_tools',role:'developer',tools:[{type:'function',name:'calculate',parameters:{type:'object'}}]},
+    {type:'message',role:'user',content:'继续'}
+  ],include:['reasoning.encrypted_content','web_search_call.action.sources']});
+  assert.match(responses.messages[0].content,/保留思路/);assert.equal(responses.tools[0].function.name,'calculate');
+});
+test('Kimi Messages 最后一条 assistant 自动转换为 Partial Mode',()=>{
+  const value=normalizeRequest('/v1/messages',{model:'kimi-k3',max_tokens:64,messages:[{role:'user',content:'写结论'},{role:'assistant',content:'Conclusion: '}]});
+  assert.equal(value.messages.at(-1).partial,true);
 });
 test('Anthropic 可关闭并行工具调用',()=>{
   const value=normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,tools:[{name:'a',input_schema:{type:'object'}}],tool_choice:{type:'auto',disable_parallel_tool_use:true}});

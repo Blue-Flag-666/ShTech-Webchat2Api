@@ -116,12 +116,29 @@ test('推理强度和回答长度转换为上游提示',()=>{
   const body=upstreamBody({...request,reasoning_effort:'high',verbosity:'low'},config);
   assert.match(body.chatInfo,/high reasoning effort/);assert.match(body.chatInfo,/low response verbosity/);
 });
+test('Kimi K3 支持 max 推理、长输出、保留思考和 Partial Mode',()=>{
+  const catalogue=[{id:'kimi-k3',upstream_id:'Kimi-k3',root_ai_type:'xinference',max_tokens:800000,capabilities:{vision:true,reasoning:true,partial:true}}];
+  const body=upstreamBody({model:'kimi-k3',messages:[{role:'user',content:'写结论'},{role:'assistant',content:'Conclusion: ',reasoning_content:'先归纳',partial:true}],max_completion_tokens:131072,reasoning_effort:'max'},config,catalogue);
+  assert.equal(body.aiType,'Kimi-k3');assert.equal(body.maxToken,131072);assert.match(body.chatInfo,/max reasoning effort/);assert.match(body.chatInfo,/Continue from/);
+  assert.equal(body.messages.at(-1).content,'Conclusion: ');assert.equal(body.messages.at(-1).reasoning_content,'先归纳');assert.equal('partial' in body.messages.at(-1),false);
+  assert.throws(()=>upstreamBody({model:'kimi-k3',messages:[{role:'user',content:'x'}],max_completion_tokens:800001},config,catalogue),/800000/);
+});
 
 test('Anthropic token 计数支持 x-api-key 且不访问上游',async()=>{
   await withServer(async()=>{throw new Error('不应访问上游');},async(call,base)=>{
     const response=await fetch(base+'/v1/messages/count_tokens',{method:'POST',headers:{'x-api-key':config.key,'content-type':'application/json'},body:JSON.stringify({model:'qwen-instruct',messages:[{role:'user',content:'你好'}]})});
     assert.equal(response.status,200);assert.ok((await response.json()).input_tokens>0);
   });
+});
+test('Kimi token 估算端点和 Anthropic 官方路径别名可用',async()=>{
+  const models={modelFetcher:async()=>({success:true,result:{records:[{aiType:'Kimi-k3',simpleName:'Kimi-K3',maxToken:800000,rootAiType:'xinference'}]}})};
+  await withServer(async()=>new Response(sse([chunk('好','stop')]),{headers:{'content-type':'text/event-stream'}}),async(call,base)=>{
+    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
+    const estimate=await fetch(base+'/v1/tokenizers/estimate-token-count',{method:'POST',headers,body:JSON.stringify({model:'kimi-k3',messages:[{role:'user',content:'你好'}]})});
+    assert.equal(estimate.status,200);assert.ok((await estimate.json()).data.total_tokens>0);
+    const message=await fetch(base+'/anthropic/v1/messages',{method:'POST',headers:{'x-api-key':config.key,'content-type':'application/json'},body:JSON.stringify({model:'kimi-k3',max_tokens:64,messages:[{role:'user',content:'你好'}]})});
+    assert.equal(message.status,200);assert.equal((await message.json()).content[0].text,'好');
+  },models);
 });
 test('截断流不伪装成功',async()=>{
   for(const stream of [false,true]) await withServer(async()=>new Response(sse([chunk('部分内容')]),{headers:{'Content-Type':'text/event-stream'}}),async call=>{

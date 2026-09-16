@@ -76,7 +76,7 @@ export function parseToolCalls(text, policy, makeId) {
 export function normalizeMessages(messages, policy) {
   if (!Array.isArray(messages) || !messages.length) throw invalid('messages 必须是非空数组');
   const result=[]; const pending=new Set();
-  for(const m of messages) {
+  for(const [index,m] of messages.entries()) {
     if(!m || !['user','assistant','system','developer','tool'].includes(m.role)) throw invalid('不支持的消息角色');
     if(m.role==='tool') {
       if(typeof m.content!=='string' || !pending.delete(m.tool_call_id)) throw invalid('tool 消息没有匹配的 tool_call_id');
@@ -84,7 +84,11 @@ export function normalizeMessages(messages, policy) {
     }
     if(pending.size) throw invalid('必须先返回所有待处理工具结果');
     if(m.content!=null && typeof m.content!=='string') throw invalid('当前仅支持文本消息');
+    if(m.reasoning_content!==undefined&&(m.role!=='assistant'||typeof m.reasoning_content!=='string'))throw invalid('reasoning_content 仅适用于 assistant 文本');
+    if(m.partial!==undefined&&(m.role!=='assistant'||typeof m.partial!=='boolean'||!m.partial||index!==messages.length-1))throw invalid('partial=true 仅适用于最后一条 assistant 消息');
+    if(m.tools!==undefined&&(m.role!=='system'||!Array.isArray(m.tools)||!m.tools.length||m.content!=null))throw invalid('动态 tools 仅适用于无 content 的 system 消息');
     let content=m.content||'';
+    if(m.tools!==undefined)content=`Dynamic tool declarations:\n${JSON.stringify(m.tools.map(tool=>tool.function))}`;
     if(m.tool_calls!==undefined) {
       if(m.role!=='assistant' || !Array.isArray(m.tool_calls)) throw invalid('tool_calls 仅适用于 assistant');
       for(const tc of m.tool_calls) {
@@ -93,7 +97,7 @@ export function normalizeMessages(messages, policy) {
         pending.add(tc.id);content+=`\n<api_tool_call>${JSON.stringify({name:tc.function.name,arguments:args})}</api_tool_call>`;
       }
     }
-    result.push({role:m.role==='developer'?'system':m.role,content});
+    result.push({role:m.role==='developer'?'system':m.role,content,...(m.reasoning_content?{reasoning_content:m.reasoning_content}:{}),...(m.partial?{partial:true}:{}),...(m.tools?{dynamic:true}:{})});
   }
   if(pending.size) throw invalid('缺少工具调用结果');
   return result;
