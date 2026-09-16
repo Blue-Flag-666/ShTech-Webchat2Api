@@ -30,6 +30,14 @@ test('验证常用 JSON Schema format',()=>{
   assert.throws(()=>parseStructured('{"id":"bad","ip":"999.0.0.1"}',policy),/格式/);
 });
 
+test('Kimi json_schema strict=false 仅保证 JSON 对象',()=>{
+  const loose=outputPolicy('/v1/chat/completions',{response_format:{type:'json_schema',json_schema:{name:'weather',strict:false,schema:{type:'object',properties:{city:{type:'string'}},required:['city']}}}});
+  assert.equal(loose.type,'json_object');assert.equal(loose.strict,false);
+  assert.equal(parseStructured('{"unexpected":1}',loose),'{"unexpected":1}');
+  assert.throws(()=>parseStructured('[]',loose),/JSON 对象/);
+  assert.throws(()=>outputPolicy('/v1/chat/completions',{response_format:{type:'json_schema',json_schema:{name:'x',strict:'yes',schema:{type:'object'}}}}),/布尔值/);
+});
+
 test('三个 HTTP 协议在返回成功前验证 JSON，流式只发送已验证结果',async()=>{
   const paths=[
     ['/v1/chat/completions',{messages:[{role:'user',content:'提取'}],response_format:{type:'json_schema',json_schema:{name:'result',schema}}}],

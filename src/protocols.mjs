@@ -112,6 +112,14 @@ export function normalizeRequest(path, input) {
       }
       if(merged.length)out.tools=merged;
     }
+    if(/kimi[-_ ]?k3/i.test(out.model||'')){
+      const thinking=out.thinking?.type!=='disabled';
+      if(out.temperature!==undefined&&(thinking?(out.temperature<0||out.temperature>1):out.temperature!==0.6))throw bad(thinking?'Kimi K3 思考模式 temperature 必须为 0–1':'Kimi K3 非思考模式 temperature 必须为 0.6');
+      if(out.top_p!==undefined&&out.top_p!==0.95)throw bad('Kimi K3 top_p 必须为 0.95');
+      if(out.presence_penalty!==undefined&&out.presence_penalty!==0)throw bad('Kimi K3 presence_penalty 必须为 0');
+      if(out.frequency_penalty!==undefined&&out.frequency_penalty!==0)throw bad('Kimi K3 frequency_penalty 必须为 0');
+      if(out.n!==undefined&&out.n!==1)throw bad('Kimi K3 n 必须为 1');
+    }
     return out;
   }
   const out = { model: input.model, stream: input.stream, messages: [] };

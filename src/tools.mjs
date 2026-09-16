@@ -11,8 +11,9 @@ export function toolPolicy(tools, choice = 'auto', parallel = true) {
   const names = new Set();
   for (const tool of tools) {
     const f = tool?.function;
-    if (tool?.type !== 'function' || typeof f?.name !== 'string' || !/^[\w-]{1,64}$/.test(f.name) || names.has(f.name)) throw invalid('工具必须具有唯一的 function.name');
+    if (tool?.type !== 'function' || typeof f?.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_-]{0,255}$/.test(f.name) || names.has(f.name)) throw invalid('工具必须具有唯一且有效的 function.name');
     if (f.parameters !== undefined && (!f.parameters || typeof f.parameters !== 'object' || Array.isArray(f.parameters))) throw invalid('工具 parameters 必须是 JSON Schema 对象');
+    if(f.strict!==undefined&&typeof f.strict!=='boolean')throw invalid('工具 strict 必须是布尔值');
     names.add(f.name);
   }
   let required = choice === 'required', allowed = names;
@@ -40,7 +41,7 @@ export function parseToolCalls(text, policy, makeId) {
     if(!args||typeof args!=='object'||Array.isArray(args))throw upstreamError('模型输出了无效工具参数');
     if(policy.custom?.has(value.name)&&typeof args.input!=='string')throw upstreamError('模型输出了无效的 custom 工具文本参数');
     const declaration=policy.tools.find(tool=>tool.function.name===value.name);
-    if(declaration?.function?.parameters)try{validateSchemaValue(args,declaration.function.parameters);}catch{throw upstreamError(`模型输出的工具参数不符合 ${value.name} 的 JSON Schema`);}
+    if(declaration?.function?.parameters&&declaration.function.strict!==false)try{validateSchemaValue(args,declaration.function.parameters);}catch{throw upstreamError(`模型输出的工具参数不符合 ${value.name} 的 JSON Schema`);}
     const suppliedId=typeof value.id==='string'&&value.id;
     let callId=suppliedId?value.id:makeId();
     if(calls.some(call=>call.id===callId)){

@@ -31,6 +31,14 @@ test('工具参数必须符合声明的 JSON Schema',()=>{
   const policy=toolPolicy(tools,'required');
   for(const text of ['<tool_call>{"name":"weather","arguments":{}}</tool_call>','<tool_call>{"name":"weather","arguments":{"city":1}}</tool_call>','<tool_call>{"name":"weather","arguments":{"city":"上海","extra":true}}</tool_call>'])assert.throws(()=>parseToolCalls(text,policy,()=> 'call_test'),/JSON Schema/);
 });
+
+test('工具 strict=false 放宽参数 Schema，名称遵循 Kimi K3 规则',()=>{
+  const loose=[{type:'function',function:{name:'weather',strict:false,parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}}];
+  assert.equal(parseToolCalls('<tool_call>{"name":"weather","arguments":{"other":1}}</tool_call>',toolPolicy(loose,'required'),()=> 'call').tool_calls.length,1);
+  assert.doesNotThrow(()=>toolPolicy([{type:'function',function:{name:'a'.repeat(256),parameters:{type:'object'}}}]));
+  for(const name of ['1bad','bad@name','a'.repeat(257)])assert.throws(()=>toolPolicy([{type:'function',function:{name}}]),/function.name/);
+  assert.throws(()=>toolPolicy([{type:'function',function:{name:'valid',strict:'yes'}}]),/strict/);
+});
 test('工具结果必须对应历史调用；全部工具结果进入文本历史',()=>{
   const messages=[{role:'user',content:'天气'},{role:'assistant',content:null,tool_calls:[{id:'call_test',type:'function',function:{name:'weather',arguments:'{}'}}]},{role:'tool',tool_call_id:'call_test',content:'晴天'}];
   assert.match(normalizeMessages(messages,toolPolicy(tools)).at(-1).content,/晴天/);

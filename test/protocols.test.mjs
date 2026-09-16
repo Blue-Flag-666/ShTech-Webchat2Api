@@ -157,6 +157,16 @@ test('Kimi Messages 最后一条 assistant 自动转换为 Partial Mode',()=>{
   const value=normalizeRequest('/v1/messages',{model:'kimi-k3',max_tokens:64,messages:[{role:'user',content:'写结论'},{role:'assistant',content:'Conclusion: '}]});
   assert.equal(value.messages.at(-1).partial,true);
 });
+
+test('Kimi K3 Chat 执行官方固定采样参数约束',()=>{
+  const base={model:'kimi-k3',messages:[{role:'user',content:'x'}]};
+  for(const temperature of [0,0.6,1])assert.equal(normalizeRequest('/v1/chat/completions',{...base,temperature}).temperature,temperature);
+  assert.equal(normalizeRequest('/v1/chat/completions',{...base,thinking:{type:'disabled'},temperature:0.6,top_p:0.95,presence_penalty:0,frequency_penalty:0,n:1}).temperature,0.6);
+  for(const body of [
+    {...base,temperature:1.1},{...base,thinking:{type:'disabled'},temperature:0},
+    {...base,top_p:0.8},{...base,presence_penalty:0.5},{...base,frequency_penalty:0.5},{...base,n:2}
+  ])assert.throws(()=>normalizeRequest('/v1/chat/completions',body),/Kimi K3/);
+});
 test('Anthropic 可关闭并行工具调用',()=>{
   const value=normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,tools:[{name:'a',input_schema:{type:'object'}}],tool_choice:{type:'auto',disable_parallel_tool_use:true}});
   assert.equal(value.parallel_tool_calls,false);

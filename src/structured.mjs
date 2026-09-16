@@ -16,8 +16,10 @@ export function outputPolicy(path,input) {
   const descriptor=path==='/v1/chat/completions' ? format.json_schema : format;
   if(!descriptor || typeof descriptor!=='object' || Array.isArray(descriptor)) throw invalid('json_schema 缺少定义');
   if(path!=='/v1/messages' && (typeof descriptor.name!=='string' || !/^[A-Za-z0-9_-]{1,64}$/.test(descriptor.name))) throw invalid('json_schema.name 无效');
+  if(descriptor.strict!==undefined&&typeof descriptor.strict!=='boolean')throw invalid('json_schema.strict 必须是布尔值');
   checkSchema(descriptor.schema,descriptor.schema);
-  return {type:'json_schema',schema:descriptor.schema,name:descriptor.name || 'output'};
+  if(descriptor.strict===false)return {type:'json_object',schema:{type:'object'},name:descriptor.name || 'output',strict:false};
+  return {type:'json_schema',schema:descriptor.schema,name:descriptor.name || 'output',strict:true};
 }
 
 export function outputPrompt(policy) {
