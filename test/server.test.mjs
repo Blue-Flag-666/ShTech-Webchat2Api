@@ -10,7 +10,7 @@ const request = { model: 'qwen-instruct', messages: [{role:'user',content:'ä½ å¥
 const chunk = (content, finish = null) => ({ id:'chatcmpl-test', object:'chat.completion.chunk', model:'qwen-instruct', created:123, choices:[{index:0,delta:{content},finish_reason:finish}] });
 const sse = values => values.map(v => `data: ${typeof v === 'string' ? v : JSON.stringify(v)}\n\n`).join('');
 async function withServer(fetcher, fn, overrides = {}) {
-  const server = createServer({...config,...overrides}, fetcher, overrides.modelFetcher || confirmedModels, overrides.tokenManager, overrides.imageFetcher);
+  const server = createServer({...config,...overrides}, fetcher, overrides.modelFetcher || confirmedModels, overrides.tokenManager, overrides.imageFetcher,overrides.frontendFetcher);
   await listenForFetch(server);
   const base = `http://127.0.0.1:${server.address().port}`;
   const call = (body = request, key = config.key) => fetch(`${base}/v1/chat/completions`, {method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify(body)});

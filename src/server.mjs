@@ -194,7 +194,7 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2) {
     options.headers['x-access-token']=await tokenManager.get(true);renewed=true;
   }
 }
-export function createServer(config = configuration(), fetcher = upstreamFetch, modelFetcher = fetchModelList, tokenManager = new TokenManager(config), imageFetcher=fetch) {
+export function createServer(config = configuration(), fetcher = upstreamFetch, modelFetcher = fetchModelList, tokenManager = new TokenManager(config), imageFetcher=fetch, frontendFetcher) {
   const queue=new RequestQueue(config.concurrency??1,config.queueSize??32,config.queueTimeout??120000);
   const responseStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000);
   let modelCache = { at: 0, data: [] };
@@ -288,7 +288,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       release=await queue.acquire(controller.signal);
       timer = setTimeout(() => controller.abort(), config.timeout);
       const accessToken=await tokenManager.get();
-      const imagePayload=await prepareImages(media.images,config,accessToken,controller.signal,imageFetcher);
+      const imagePayload=await prepareImages(media.images,config,accessToken,controller.signal,imageFetcher,frontendFetcher);
       const body = upstreamBody(input, config, catalogue, formatPolicy,imagePayload);
       const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream',
         'x-access-token': accessToken, Origin: 'https://genai.shanghaitech.edu.cn',

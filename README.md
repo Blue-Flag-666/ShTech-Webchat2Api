@@ -79,7 +79,7 @@ GENAI_PASSWORD=密码
 # 通常不需要；只有上游账号要求固定网页会话时填写
 # GENAI_CHAT_GROUP_ID=网页聊天请求中的会话ID
 
-# 只有需要发送图片时才填写网页上传请求中的token
+# 可选：网页自动发现失败时覆盖图片上传token
 # GENAI_UPLOAD_TOKEN=图片上传token
 ```
 
@@ -137,7 +137,7 @@ npm start
 
 Chat 支持 `max_tokens`、`max_completion_tokens`、`stream_options.include_usage`、`tools`、`tool_choice`、`response_format`、常用采样参数和 `net_go`。Responses 支持进程内 `store:true`、`previous_response_id`、读取、删除和输入项查询；默认保存一小时，服务重启后清空。
 
-图片支持 URL 和 Base64，需配置 `GENAI_UPLOAD_TOKEN`；Kimi K3 会被识别为视觉模型。Chat `web_search_options`、Responses `web_search` 和 Anthropic 服务端搜索工具会映射到 Webchat 的 `netGo`，搜索过程不会伪造原生工具事件。视频、音频、embeddings 和 reranker 尚未支持。请求默认按单并发排队，并对建立流之前的临时上游故障有限重试；并发、队列和重试次数均可通过 `.env` 调整。
+图片支持 URL 和 Base64；程序会从学校公开网页自动读取上传凭据，`GENAI_UPLOAD_TOKEN` 只用于覆盖。Kimi K3 会被识别为视觉模型。Chat `web_search_options`、Responses `web_search` 和 Anthropic 服务端搜索工具会映射到 Webchat 的 `netGo`，搜索过程不会伪造原生工具事件。视频、音频、embeddings 和 reranker 尚未支持。请求默认按单并发排队，并对建立流之前的临时上游故障有限重试；并发、队列和重试次数均可通过 `.env` 调整。
 
 ## 登录与验证
 

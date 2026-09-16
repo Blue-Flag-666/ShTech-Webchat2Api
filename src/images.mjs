@@ -3,12 +3,64 @@ import https from 'node:https';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { createHash } from 'node:crypto';
+import { frontendFetch } from './transport.mjs';
 
 const MAX_IMAGES=10,MAX_BYTES=10*1024*1024;
 const types=new Map([['image/jpeg','.jpg'],['image/png','.png'],['image/bmp','.bmp'],['image/gif','.gif'],['image/webp','.webp']]);
 const invalid=message=>Object.assign(new Error(message),{status:400});
 const upstream=message=>Object.assign(new Error(message),{status:502});
 const cache=new Map();
+const uploadTokens=new Map();
+const siteOrigin='https://genai.shanghaitech.edu.cn';
+
+async function textLimited(response,limit=8*1024*1024) {
+  if(!response.ok){await response.body?.cancel();throw new Error(`frontend HTTP ${response.status}`);}
+  let size=0;const chunks=[];
+  for await(const chunk of response.body){size+=chunk.byteLength;if(size>limit)throw new Error('frontend asset exceeds size limit');chunks.push(chunk);}
+  return Buffer.concat(chunks).toString('utf8');
+}
+async function siteText(path,signal,fetcher) {
+  const response=await fetcher(new URL(path,siteOrigin).href,{headers:{Accept:'text/html,application/javascript,*/*',Referer:`${siteOrigin}/`},signal,redirect:'error'});
+  return textLimited(response);
+}
+function scriptPaths(html) {
+  const found=new Set();
+  for(const match of html.matchAll(/(?:src|href)\s*=\s*["']?([^"'\s>]+\.js)(?=["'\s>])/gi)){
+    try{const url=new URL(match[1],siteOrigin);if(url.origin===siteOrigin&&url.pathname.startsWith('/js/'))found.add(url.pathname);}catch{}
+  }
+  return [...found];
+}
+function tokenIn(source) {
+  for(const marker of ['uploadImageFile','uploadType']){
+    let from=0,index;
+    while((index=source.indexOf(marker,from))>=0){
+      const nearby=source.slice(Math.max(0,index-4000),index+24000);
+      if(nearby.includes('/sys/common/upload')||nearby.includes("form.set('biz'")||nearby.includes('FormData')){
+        const match=/(?:^|[,;{])\s*token\s*:\s*["']([A-Za-z0-9_-]{16,128})["']/.exec(nearby);
+        if(match)return match[1];
+      }
+      from=index+marker.length;
+    }
+  }
+}
+async function findUploadToken(signal,fetcher) {
+  const html=await siteText('/',signal,fetcher),paths=scriptPaths(html);
+  const appPath=paths.find(path=>/\/app\.[a-z0-9.-]+\.js$/i.test(path));
+  if(!appPath)throw new Error('frontend app asset not found');
+  const app=await siteText(appPath,signal,fetcher);
+  const entry=/["']\.\/dashboard\/Analysis\.vue["']\s*:\s*\[([^\]]{1,2000})\]/.exec(app);
+  const names=entry?[...entry[1].matchAll(/["'](chunk-[a-z0-9-]+)["']/gi)].map(match=>match[1]):[];
+  const candidates=paths.filter(path=>names.some(name=>path.includes(`/${name}.`))).slice(0,8);
+  for(const path of candidates){const token=tokenIn(await siteText(path,signal,fetcher));if(token)return token;}
+  throw new Error('upload token not found in frontend assets');
+}
+export async function discoverUploadToken(signal,fetcher=frontendFetch) {
+  const cached=uploadTokens.get(fetcher),now=Date.now();
+  if(cached?.value&&cached.expires>now)return cached.value;
+  if(cached?.pending)return cached.pending;
+  const pending=findUploadToken(signal,fetcher).then(value=>{uploadTokens.set(fetcher,{value,expires:Date.now()+3600000});return value;},error=>{uploadTokens.delete(fetcher);throw error;});
+  uploadTokens.set(fetcher,{pending});return pending;
+}
 
 function imageUrl(part) {
   const value=typeof part?.image_url==='string'?part.image_url:part?.image_url?.url||part?.url;
@@ -122,14 +174,13 @@ function data(value) {
   if(!bytes.length||bytes.length>MAX_BYTES)throw invalid('单张图片必须介于 1 字节和 10 MB 之间');
   const mime=match[1].toLowerCase();if(!validBytes(bytes,mime))throw invalid('图片内容与声明格式不符');return{bytes,mime,name:`image${types.get(mime)}`};
 }
-async function upload(file,config,accessToken,signal,fetcher) {
-  if(!config.uploadToken)throw invalid('图片输入需要配置 GENAI_UPLOAD_TOKEN');
+async function upload(file,uploadToken,accessToken,signal,fetcher) {
   // Scope cached upload URLs to the upload credential so two configured
   // accounts in one process can never reuse each other's private result.
-  const hash=createHash('sha256').update(config.uploadToken).update('\0').update(file.bytes).digest('hex');
+  const hash=createHash('sha256').update(uploadToken).update('\0').update(file.bytes).digest('hex');
   if(cache.has(hash))return cache.get(hash);
   const form=new FormData();form.set('file',new Blob([file.bytes],{type:file.mime}),file.name);form.set('biz','temp');form.set('uploadType','local');
-  const response=await fetcher('https://genaipic.shanghaitech.edu.cn/sys/common/upload',{method:'POST',headers:{Accept:'*/*',Origin:'https://genai.shanghaitech.edu.cn',Referer:'https://genai.shanghaitech.edu.cn/','X-Access-Token':accessToken,token:config.uploadToken},body:form,signal,redirect:'error'});
+  const response=await fetcher('https://genaipic.shanghaitech.edu.cn/sys/common/upload',{method:'POST',headers:{Accept:'*/*',Origin:'https://genai.shanghaitech.edu.cn',Referer:'https://genai.shanghaitech.edu.cn/','X-Access-Token':accessToken,token:uploadToken},body:form,signal,redirect:'error'});
   if(!response.ok){await response.body?.cancel();throw upstream(`图片上传 HTTP ${response.status}`);}
   let payload;try{payload=await response.json();}catch{throw upstream('图片上传返回无效 JSON');}
   const result=payload?.result,url=result?.url;
@@ -139,13 +190,15 @@ async function upload(file,config,accessToken,signal,fetcher) {
   return value;
 }
 
-export async function prepareImages(inputs,config,accessToken,signal,fetcher=fetch) {
+export async function prepareImages(inputs,config,accessToken,signal,fetcher=fetch,siteFetcher=frontendFetch) {
+  let uploadToken=config.uploadToken;
+  if(inputs.length&&!uploadToken){try{uploadToken=await discoverUploadToken(signal,siteFetcher);}catch{throw upstream('图片上传凭据自动发现失败，可配置 GENAI_UPLOAD_TOKEN');}}
   const uploaded=[];
   for(const value of inputs){
     let file;
     try{file=value.startsWith('data:')?data(value):await remote(value,signal);}catch(error){if(error.status)throw error;throw invalid('无法安全下载图片');}
     if(!validBytes(file.bytes,file.mime))throw invalid('图片内容与声明格式不符');
-    uploaded.push(await upload(file,config,accessToken,signal,fetcher));
+    uploaded.push(await upload(file,uploadToken,accessToken,signal,fetcher));
   }
   if(!uploaded.length)return{};
   return {imageUrl:uploaded[0].imageUrl,imageUrls:uploaded.map(item=>item.imageUrl),width:uploaded[0].width,height:uploaded[0].height};

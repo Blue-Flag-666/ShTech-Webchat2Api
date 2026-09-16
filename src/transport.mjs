@@ -19,6 +19,13 @@ export function casFetch(url,options={}) {
   return transportRequest(url,options,true);
 }
 
+export function frontendFetch(url,options={}) {
+  const target=new URL(url,origin);
+  const valid=target.origin===origin && (target.pathname==='/' || /^\/js\/[a-z0-9.-]+\.js$/i.test(target.pathname));
+  if(!valid || target.username || target.password)throw new Error('Unsupported frontend URL');
+  return transportRequest(target.href,{method:'GET',...options});
+}
+
 function transportRequest(url,options,auth=false) {
   return new Promise((resolve, reject) => {
     const request = https.request(url, {

@@ -7,7 +7,7 @@ import { Writable } from 'node:stream';
 import { createInterface } from 'node:readline/promises';
 import { configuration, startServer } from './server.mjs';
 
-const VERSION = '0.1.0';
+const VERSION = '0.3.0';
 const sea = isSea();
 const defaultConfig = sea ? join(dirname(process.execPath), '.env') : resolve('.env');
 
@@ -124,7 +124,7 @@ async function inspect(command,path) {
     console.log(`版本: ${VERSION}  平台: ${process.platform}-${process.arch}`);
     console.log(`配置: ${path}`);
     console.log(`登录: ${config.username?'CAS 自动刷新':config.token?'静态 Token':'未配置'}`);
-    console.log(`图片: ${config.uploadToken?'已配置上传 Token':'未配置上传 Token'}`);
+    console.log(`图片: ${config.uploadToken?'使用配置的上传 Token':'自动读取网页上传凭据'}`);
   }
   const endpoint=command==='models'?'/v1/models':'/health';
   let response;try{response=await fetch(base+endpoint,{headers,signal});}catch{throw new Error(`无法连接 ${base}，请先启动服务`);}

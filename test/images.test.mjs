@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractImages, prepareImages } from '../src/images.mjs';
+import { discoverUploadToken, extractImages, prepareImages } from '../src/images.mjs';
 
 const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
@@ -19,6 +19,33 @@ test('图片上传生成 Webchat 图片字段且不泄露上传响应',async()=>
   const result=await prepareImages([`data:image/png;base64,${png}`],{uploadToken:'upload'},'access',AbortSignal.timeout(1000),fetcher);
   assert.equal(request.url,'https://genaipic.shanghaitech.edu.cn/sys/common/upload');assert.equal(request.options.headers.token,'upload');
   assert.deepEqual(result,{imageUrl:'https://genaipic.shanghaitech.edu.cn/sys/common/static/abc.png',imageUrls:['https://genaipic.shanghaitech.edu.cn/sys/common/static/abc.png'],width:1,height:2});
+});
+
+test('从公开前端自动发现图片上传 token',async()=>{
+  const calls=[];
+  const frontend=async url=>{
+    calls.push(url);
+    const path=new URL(url).pathname;
+    if(path==='/')return new Response('<script src="/js/app.abc.js"></script><link href=/js/chunk-image.def.js rel=prefetch>');
+    if(path==='/js/app.abc.js')return new Response('"./dashboard/Analysis.vue":["chunk-base","chunk-image"]');
+    if(path==='/js/chunk-image.def.js')return new Response('uploadImageFile:function(){var f=new FormData;f.set("uploadType","local");return "/sys/common/upload",{Accept:"*/*",token:"public-upload-token-123"}}');
+    return new Response('',{status:404});
+  };
+  assert.equal(await discoverUploadToken(AbortSignal.timeout(1000),frontend),'public-upload-token-123');
+  assert.equal(calls.length,3);
+});
+
+test('未配置上传 token 时自动发现后上传',async()=>{
+  let token;
+  const upload=async(_,options)=>{token=options.headers.token;return new Response(JSON.stringify({success:true,result:{url:'auto.png'}}));};
+  const frontend=async url=>{
+    const path=new URL(url).pathname;
+    if(path==='/')return new Response('<script src=/js/app.abc.js></script><link href=/js/chunk-image.def.js>');
+    if(path==='/js/app.abc.js')return new Response('"./dashboard/Analysis.vue":["chunk-image"]');
+    return new Response('uploadImageFile:function(){var f=new FormData;f.set("uploadType","local");return "/sys/common/upload",{token:"auto-public-token-456"}}');
+  };
+  await prepareImages([`data:image/png;base64,${png}`],{},'access',AbortSignal.timeout(1000),upload,frontend);
+  assert.equal(token,'auto-public-token-456');
 });
 
 test('拒绝视频、非用户图片和不支持格式',async()=>{
