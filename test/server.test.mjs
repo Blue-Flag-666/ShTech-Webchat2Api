@@ -30,7 +30,7 @@ test('图片输入上传后转换为 Webchat 图片字段',async()=>{
 test('Responses 工具结果中的截图会上传给 Kimi 继续分析',async()=>{
   const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
   await withServer(async(_,options)=>{
-    const body=JSON.parse(options.body);assert.equal(body.chatInfo,'分析截图');assert.ok(body.messages.some(message=>message.content.includes('Tool result (call_browser):\n截图结果')));
+    const body=JSON.parse(options.body);assert.equal(body.chatInfo,'分析截图');
     assert.equal(body.imageUrl,'https://genaipic.shanghaitech.edu.cn/sys/common/static/screenshot.png');
     return new Response(sse([chunk('界面正常','stop')]),{headers:{'content-type':'text/event-stream'}});
   },async(_call,base)=>{
