@@ -87,7 +87,10 @@ export function extractImages(path,input) {
   if(path==='/v1/chat/completions') {
     if(Array.isArray(value.messages))for(const message of value.messages)message.content=content(message.content,message.role,images);
   } else if(path==='/v1/responses') {
-    if(Array.isArray(value.input))for(const item of value.input)if(item&&(!item.type||item.type==='message'))item.content=content(item.content,item.role,images);
+    if(Array.isArray(value.input))for(const item of value.input){
+      if(item&&(!item.type||item.type==='message'))item.content=content(item.content,item.role,images);
+      else if(['function_call_output','custom_tool_call_output'].includes(item?.type))item.output=content(item.output,'tool',images);
+    }
   } else if(path==='/v1/messages') {
     if(Array.isArray(value.messages))for(const message of value.messages){
       if(!Array.isArray(message.content))continue;
