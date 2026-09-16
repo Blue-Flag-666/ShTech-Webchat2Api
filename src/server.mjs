@@ -376,7 +376,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         }
         throw error(405,'该对话资源不支持此方法');
       }
-      const storedMatch=/^\/v1\/responses\/([^/]+)(\/(?:input_items|cancel))?$/.exec(path);
+      const storedMatch=/^\/v1\/responses\/(?!compact$|input_tokens$)([^/]+)(\/(?:input_items|cancel))?$/.exec(path);
       if(storedMatch){
         let responseId;try{responseId=decodeURIComponent(storedMatch[1]);}catch{throw error(400,'响应 ID 编码无效');}
         if(req.method==='GET'){
