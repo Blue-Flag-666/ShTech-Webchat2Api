@@ -3,6 +3,8 @@ import { extname } from 'node:path';
 
 const failure=(status,message)=>Object.assign(new Error(message),{status});
 const TEXT_EXTENSIONS=new Set(['.txt','.md','.markdown','.json','.jsonl','.csv','.tsv','.xml','.html','.htm','.css','.scss','.less','.js','.mjs','.cjs','.jsx','.ts','.tsx','.py','.java','.c','.h','.cc','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.sh','.bash','.zsh','.fish','.ps1','.yaml','.yml','.toml','.ini','.conf','.cfg','.env','.sql','.graphql','.gql','.log','.diff','.patch','.vue','.svelte','.tex','.rst']);
+const FILE_PURPOSES=new Set(['assistants','batch','fine-tune','vision','user_data','evals']);
+const INTERNAL_FILE_PURPOSES=new Set(['assistants_output','batch_output','fine-tune-results']);
 
 function cleanFilename(value){
   if(typeof value!=='string'||!value.trim())throw failure(400,'文件名不能为空');
@@ -47,11 +49,11 @@ export class FileStore {
     for(const [id,entry] of this.entries)if(entry.expiresAt<=now)this.entries.delete(id);
     while(this.entries.size>this.maximum)this.entries.delete(this.entries.keys().next().value);
   }
-  create({filename,mime,bytes,purpose='user_data',expiresAfter}){
+  create({filename,mime,bytes,purpose='user_data',expiresAfter,internal=false}){
     if(!this.maximum)throw failure(400,'文件存储已禁用');
     if(!Buffer.isBuffer(bytes)||!bytes.length)throw failure(400,'上传文件不能为空');
     if(bytes.length>this.maxBytes)throw failure(413,`单个文件不能超过 ${Math.ceil(this.maxBytes/1048576)} MiB`);
-    if(!['assistants','batch','fine-tune','vision','user_data','evals'].includes(purpose))throw failure(400,'文件 purpose 无效');
+    if(!FILE_PURPOSES.has(purpose)&&!(internal&&INTERNAL_FILE_PURPOSES.has(purpose)))throw failure(400,'文件 purpose 无效');
     const created=Date.now(),ttl=expiresAfter??this.ttl,id=`file-${randomUUID().replaceAll('-','')}`;
     if(!Number.isInteger(ttl)||ttl<3600000||ttl>2592000000)throw failure(400,'expires_after.seconds 必须为 3600–2592000');
     const value={id,object:'file',bytes:bytes.length,created_at:Math.floor(created/1000),expires_at:Math.floor((created+ttl)/1000),filename:cleanFilename(filename),purpose,mime:mime||'application/octet-stream'};

@@ -53,6 +53,13 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     const completed=await client.uploads.complete(upload.id,{part_ids:[first.id,second.id]});assert.equal(completed.status,'completed');assert.equal(await (await client.files.content(completed.file.id)).text(),'chunked upload');
     const pdf=await client.files.create({file:new File([simplePdf('PDF attachment works')],'document.pdf',{type:'application/pdf'}),purpose:'user_data'});
     const pdfResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_file',file_id:pdf.id}]}],store:false});assert.equal(pdfResponse.output_text,'你好');
+    const batchLine={custom_id:'sdk-batch-1',method:'POST',url:'/v1/responses',body:{model:'qwen-instruct',input:'批处理',store:false}};
+    const batchInput=await client.files.create({file:new File([JSON.stringify(batchLine)],'requests.jsonl',{type:'application/jsonl'}),purpose:'batch'});
+    let batch=await client.batches.create({input_file_id:batchInput.id,endpoint:'/v1/responses',completion_window:'24h'});
+    for(let attempt=0;attempt<100&&!['completed','failed','cancelled'].includes(batch.status);attempt++){await new Promise(resolve=>setTimeout(resolve,10));batch=await client.batches.retrieve(batch.id);}
+    assert.equal(batch.status,'completed');assert.equal(batch.request_counts.completed,1);
+    const batchOutput=JSON.parse((await (await client.files.content(batch.output_file_id)).text()).trim());assert.equal(batchOutput.custom_id,'sdk-batch-1');assert.equal(batchOutput.response.body.output_text,'你好');
+    assert.equal((await client.batches.list({limit:1})).data[0].id,batch.id);
     const chat=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}]});
     assert.equal(chat.choices[0].message.content,'你好');
     const completion=await client.completions.create({model:'qwen-instruct',prompt:'你'});

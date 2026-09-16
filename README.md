@@ -129,6 +129,7 @@ npm start
 | `/v1/conversations`、`/v1/conversations/{id}/items` | Bearer `API_KEY` | 创建、读取、更新、删除对话及分页管理对话项 | JSON |
 | `/v1/files`、`/v1/files/{id}`、`/v1/files/{id}/content` | Bearer `API_KEY` | 上传、列出、读取和删除文本、代码及 PDF | JSON / 原文件 |
 | `/v1/uploads`、`/v1/uploads/{id}/parts`、`complete`、`cancel` | Bearer `API_KEY` | OpenAI 兼容的分片上传，完成后生成 File | JSON |
+| `/v1/batches`、`/v1/batches/{id}`、`cancel` | Bearer `API_KEY` | 通过 `purpose=batch` 的 JSONL 文件批量执行 Chat、Responses 或 Completions 请求 | JSON / 结果文件 |
 | `POST /v1/messages` | `x-api-key` 或 Bearer | `messages`、system、tool_use/tool_result | `message_stop` |
 | `POST /v1/messages/count_tokens` | `x-api-key` 或 Bearer | 估算 Anthropic 输入 token | JSON |
 | `GET /v1/models` | Bearer `API_KEY` | 国内自部署模型列表 | JSON |
@@ -149,10 +150,10 @@ npm start
 | 结构化输出 | 支持 JSON Object 和 JSON Schema，但依赖提示词生成与本地校验 | 支持时通常使用模型原生约束解码，格式保证更强 |
 | 联网搜索 | 将 Chat、Responses 和 Anthropic 搜索请求映射到 Webchat 的 `netGo`；不伪造原生搜索调用、步骤或引用事件 | 支持时可返回完整工具调用生命周期、来源和引用信息 |
 | 多轮状态 | 支持 `previous_response_id`、Conversations、后台任务、取消和流式续传；默认只在本进程内保存一小时 | 通常由云端持久化，并按平台的数据保留策略跨进程提供 |
-| 文件能力 | 兼容 Files 和分片 Uploads；文件默认保存在内存中，文本、代码和带文本层 PDF 会转换为模型上下文 | 通常使用持久对象存储，还可能提供原生文件搜索、向量库、批处理和微调 |
+| 文件与批处理 | 兼容 Files、分片 Uploads 和 Batches；文件与任务默认保存在内存中，Batch 在本地队列中逐条调用学校 Webchat | 通常使用持久对象存储和独立批处理算力，还可能提供原生文件搜索、向量库和微调 |
 | Token 与缓存 | 提供兼容的 token 估算和 usage 字段，无法取得 Kimi K3 的精确内部 tokenizer、缓存命中与计费信息 | 由原生 tokenizer 和计费系统返回精确用量及缓存数据 |
 | 并发与可靠性 | 受学校 Webchat 能力限制，默认单并发排队，并在流开始前有限重试 | 通常提供明确的 RPM/TPM 配额、弹性并发和服务等级 |
-| 尚未覆盖 | Realtime、Batches、embeddings、reranker、向量库、微调、音频、视频及原生服务端工具 | 是否支持取决于提供商；完整平台通常覆盖其中更多资源 |
+| 尚未覆盖 | Realtime、embeddings、reranker、向量库、微调、音频、视频及原生服务端工具 | 是否支持取决于提供商；完整平台通常覆盖其中更多资源 |
 
 因此，本项目可作为常用 SDK 和代码 Agent 的兼容接入层，尤其适合使用学校 Kimi K3 完成文本、图片、工具调用和长上下文开发任务。依赖精确计费、持久云端状态、原生内置工具或未列出的资源接口时，不能视为普通云 API 的无差别替代品。
 
@@ -162,7 +163,7 @@ npm start
 
 Chat 支持 `max_tokens`、`max_completion_tokens`、`stream_options.include_usage`、`tools`、`tool_choice`、`response_format`、常用采样参数和 `net_go`；Kimi K3 的采样参数按官方范围校验。Responses 默认在进程内保存，支持 `item_reference`、`previous_response_id`、`conversation`、`background:true`、后台流式输出、按事件序号断线续传、Kimi 上下文压缩、输入 token 估算、`truncation:auto`、`context_management`、状态轮询、取消、读取、删除和输入项查询；`store:false` 会返回可回放的不透明 reasoning 数据，便于 OpenCode 继续多轮推理。Conversations 支持完整资源和对话项管理。状态默认保存一小时，服务重启后清空。
 
-图片支持 URL、Base64、Files API 的 `file_id`、用户输入、工具结果截图和 `computer_call_output` 截图；程序会从学校公开网页自动读取上传凭据，`GENAI_UPLOAD_TOKEN` 只用于覆盖。Files API 文件保存在内存一小时，Responses `input_file` 及工具返回的文本、代码和带文本层 PDF 会带文件名注入上下文，默认单文件上限 2 MiB、PDF 上限 200 页；扫描版 PDF 暂无 OCR。Uploads API 支持创建、追加分片、校验、完成和取消。Responses 还能回放 OpenCode 的 shell、apply patch、program 和 computer 工具历史。Kimi K3 会被识别为视觉模型。Chat `web_search_options`、Responses `web_search` 和 Anthropic 服务端搜索工具会映射到 Webchat 的 `netGo`，搜索过程不会伪造原生工具事件。Office 文档、视频、音频、embeddings 和 reranker 尚未支持。请求默认按单并发排队，并对建立流之前的临时上游故障有限重试；并发、队列和重试次数均可通过 `.env` 调整。
+图片支持 URL、Base64、Files API 的 `file_id`、用户输入、工具结果截图和 `computer_call_output` 截图；程序会从学校公开网页自动读取上传凭据，`GENAI_UPLOAD_TOKEN` 只用于覆盖。Files API 文件保存在内存一小时，Responses `input_file` 及工具返回的文本、代码和带文本层 PDF 会带文件名注入上下文，默认单文件上限 2 MiB、PDF 上限 200 页；扫描版 PDF 暂无 OCR。Uploads API 支持创建、追加分片、校验、完成和取消。Batches API 支持最多 50000 条 JSONL 请求、状态查询、分页、取消、用量汇总及独立成功/错误文件；任务复用普通请求队列，不提供商业 Batch API 的折扣或额外并发。Responses 还能回放 OpenCode 的 shell、apply patch、program 和 computer 工具历史。Kimi K3 会被识别为视觉模型。Chat `web_search_options`、Responses `web_search` 和 Anthropic 服务端搜索工具会映射到 Webchat 的 `netGo`，搜索过程不会伪造原生工具事件。Office 文档、视频、音频、embeddings 和 reranker 尚未支持。请求默认按单并发排队，并对建立流之前的临时上游故障有限重试；并发、队列和重试次数均可通过 `.env` 调整。
 
 ## 登录与验证
 
