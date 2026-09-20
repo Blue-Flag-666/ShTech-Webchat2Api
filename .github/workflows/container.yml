@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: docker/setup-qemu-action@v4.3.0
       - uses: docker/setup-buildx-action@v4.3.0
-      - uses: docker/build-push-action@v7.3.0
+      - uses: docker/build-push-action@v7.4.0
         with:
           context: .
           platforms: linux/${{ matrix.arch }}
@@ -134,7 +134,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha
-      - uses: docker/build-push-action@v7.3.0
+      - uses: docker/build-push-action@v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
