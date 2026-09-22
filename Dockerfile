@@ -12,7 +12,9 @@ FROM alpine:3.24.1
 
 RUN apk add --no-cache ca-certificates libstdc++ \
   && addgroup -g 1000 node \
-  && adduser -u 1000 -G node -s /sbin/nologin -D node
+  && adduser -u 1000 -G node -s /sbin/nologin -D node \
+  && mkdir -p /data \
+  && chown node:node /data
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY THIRD_PARTY_LICENSES/Node.js.txt /usr/share/licenses/nodejs/LICENSE
 COPY THIRD_PARTY_LICENSES/unpdf.txt /usr/share/licenses/unpdf/LICENSE
