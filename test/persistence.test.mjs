@@ -52,7 +52,7 @@ test('服务重启后恢复 Files、Conversations 和 Vector Stores，但不缓�
   await close(first);
   const second=createServer(config,upstream,confirmedModels);await listenForFetch(second);t.after(()=>close(second));const secondBase=`http://127.0.0.1:${second.address().port}`;
   assert.equal((await(await fetch(`${secondBase}/v1/files/${file.id}`,{headers:auth})).json()).filename,'guide.md');
-  const items=await(await fetch(`${secondBase}/v1/conversations/${conversation.id}/items`,{headers:auth})).json();assert.equal(items.data[0].content[0].text,'保留我');
+  const items=await(await fetch(`${secondBase}/v1/conversations/${conversation.id}/items`,{headers:auth})).json();assert.equal(items.data[0].content,'保留我');
   const found=await(await fetch(`${secondBase}/v1/vector_stores/${vector.id}/search`,{method:'POST',headers:jsonHeaders,body:JSON.stringify({query:'deployment'})})).json();assert.equal(found.data[0].file_id,file.id);
   assert.equal((await fetch(`${secondBase}/v1/responses/${response.id}`,{headers:auth})).status,404);
 });
