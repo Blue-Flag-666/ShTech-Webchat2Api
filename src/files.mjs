@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import { extractOfficeText } from './office.mjs';
+import { extractDocumentText } from './documents.mjs';
 
 const failure=(status,message)=>Object.assign(new Error(message),{status});
 const TEXT_EXTENSIONS=new Set(['.txt','.md','.markdown','.json','.jsonl','.csv','.tsv','.xml','.html','.htm','.css','.scss','.less','.js','.mjs','.cjs','.jsx','.ts','.tsx','.py','.java','.c','.h','.cc','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.sh','.bash','.zsh','.fish','.ps1','.yaml','.yml','.toml','.ini','.conf','.cfg','.env','.sql','.graphql','.gql','.log','.diff','.patch','.vue','.svelte','.tex','.rst']);
@@ -10,6 +11,12 @@ const OFFICE_TYPES=new Map([
   ['.docx','docx'],['application/vnd.openxmlformats-officedocument.wordprocessingml.document','docx'],
   ['.pptx','pptx'],['application/vnd.openxmlformats-officedocument.presentationml.presentation','pptx'],
   ['.xlsx','xlsx'],['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','xlsx']
+]);
+const DOCUMENT_TYPES=new Map([
+  ['.odt','odt'],['application/vnd.oasis.opendocument.text','odt'],
+  ['.ods','ods'],['application/vnd.oasis.opendocument.spreadsheet','ods'],
+  ['.odp','odp'],['application/vnd.oasis.opendocument.presentation','odp'],
+  ['.epub','epub'],['application/epub+zip','epub']
 ]);
 
 function cleanFilename(value){
@@ -38,6 +45,7 @@ export async function extractFileText(file,maxPages=200){
   const mime=(file.mime||'').split(';')[0].toLowerCase(),extension=extname(file.filename).toLowerCase();
   if(mime==='application/pdf'||extension==='.pdf')return pdfText(file,maxPages);
   const office=OFFICE_TYPES.get(mime)||OFFICE_TYPES.get(extension);if(office)return extractOfficeText(file,office);
+  const document=DOCUMENT_TYPES.get(mime)||DOCUMENT_TYPES.get(extension);if(document)return extractDocumentText(file,document);
   if(!(mime.startsWith('text/')||['application/json','application/jsonl','application/xml','application/yaml','application/x-yaml','application/toml','application/javascript'].includes(mime)||TEXT_EXTENSIONS.has(extension)))throw failure(400,`暂不支持读取文件类型：${mime||extension||'unknown'}`);
   let value;try{value=new TextDecoder('utf-8',{fatal:true}).decode(file.bytes);}catch{throw failure(400,`文件 ${file.filename} 不是有效 UTF-8 文本`);}
   return {text:value,mime:mime||'text/plain'};
@@ -51,11 +59,11 @@ ${parsed.text}
 }
 
 export class FileStore {
-  constructor(maximum=32,ttl=60*60*1000,maxBytes=2*1024*1024){
+  constructor(maximum=32,ttl=60*60*1000,maxBytes=10*1024*1024,entries=new Map()){
     if(!Number.isInteger(maximum)||maximum<0)throw new Error('文件存储数量必须为非负整数');
     if(!Number.isFinite(ttl)||ttl<=0)throw new Error('文件存储有效期必须为正数');
     if(!Number.isInteger(maxBytes)||maxBytes<1)throw new Error('文件大小上限必须为正整数');
-    this.maximum=maximum;this.ttl=ttl;this.maxBytes=maxBytes;this.entries=new Map();
+    this.maximum=maximum;this.ttl=ttl;this.maxBytes=maxBytes;this.entries=entries;this.prune();
   }
   prune(now=Date.now()){
     for(const [id,entry] of this.entries)if(entry.expiresAt<=now)this.entries.delete(id);
@@ -140,11 +148,12 @@ function storedImage(fileId,store){
 
 export async function expandInputFiles(path,input,store,{pdfMaxPages=200}={}){
   if(!Number.isInteger(pdfMaxPages)||pdfMaxPages<1)throw new Error('PDF 页数上限必须为正整数');
-  const value=structuredClone(input);
+  const value=structuredClone(input);let totalBytes=0;
+  const inputFile=part=>{const file=inlineFile(part,store);totalBytes+=file.bytes.length;if(totalBytes>store.maxBytes)throw failure(413,`输入文件总大小不能超过 ${Math.ceil(store.maxBytes/1048576)} MiB`);return file;};
   const convert=async content=>{
     if(!Array.isArray(content))return content;
     return Promise.all(content.map(async part=>{
-      if(part?.type==='input_file')return{type:'input_text',text:await textFile(inlineFile(part,store),pdfMaxPages)};
+      if(part?.type==='input_file')return{type:'input_text',text:await textFile(inputFile(part),pdfMaxPages)};
       if(part?.type==='input_image'&&part.file_id!==undefined)return{...part,file_id:undefined,image_url:storedImage(part.file_id,store)};
       return part;
     }));
@@ -155,7 +164,7 @@ export async function expandInputFiles(path,input,store,{pdfMaxPages=200}={}){
     else if(item?.type==='computer_call_output'&&item.output?.type==='computer_screenshot'&&item.output.file_id!==undefined)item.output={...item.output,file_id:undefined,image_url:storedImage(item.output.file_id,store)};
   }
   if(path==='/v1/chat/completions'&&Array.isArray(value.messages))for(const message of value.messages)if(Array.isArray(message.content))message.content=await Promise.all(message.content.map(async part=>{
-    if(part?.type!=='file')return part;const file=part.file;if(!file||typeof file!=='object')throw failure(400,'file 内容块无效');return{type:'text',text:await textFile(inlineFile({file_id:file.file_id,file_data:file.file_data,filename:file.filename},store),pdfMaxPages)};
+    if(part?.type!=='file')return part;const file=part.file;if(!file||typeof file!=='object')throw failure(400,'file 内容块无效');return{type:'text',text:await textFile(inputFile({file_id:file.file_id,file_data:file.file_data,filename:file.filename}),pdfMaxPages)};
   }));
   return value;
 }

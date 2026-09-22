@@ -38,3 +38,8 @@ test('Responses input_file 与工具文件结果转换为带文件名的文本�
   assert.match(value.input[1].output[0].text,/build\.log[\s\S]*build failed/);
   assert.match(value.input[2].content[0].image_url,/^data:image\/png;base64,/);
 });
+
+test('单请求多个输入文件合计不能超过网页上限',async()=>{
+  const store=new FileStore(4,3600000,10),first=store.create({filename:'a.txt',mime:'text/plain',bytes:Buffer.from('123456')}),second=store.create({filename:'b.txt',mime:'text/plain',bytes:Buffer.from('abcdef')});
+  await assert.rejects(()=>expandInputFiles('/v1/responses',{input:[{role:'user',content:[{type:'input_file',file_id:first.id},{type:'input_file',file_id:second.id}]}]},store),/总大小/);
+});

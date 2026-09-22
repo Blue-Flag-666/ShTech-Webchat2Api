@@ -16,6 +16,15 @@ async function withServer(fetcher, fn, overrides = {}) {
   const call = (body = request, key = config.key) => fetch(`${base}/v1/chat/completions`, {method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
   try { await fn(call, base); } finally { server.closeAllConnections(); await new Promise(r => server.close(r)); }
 }
+test('错误响应提供请求 ID、稳定错误码和鉴权头',async()=>{
+  await withServer(async()=>{throw new Error('不应调用上游');},async(_call,base)=>{
+    const unauthorized=await fetch(`${base}/v1/models`,{headers:{'x-request-id':'client-request-1'}}),body=await unauthorized.json();
+    assert.equal(unauthorized.status,401);assert.equal(unauthorized.headers.get('x-request-id'),'client-request-1');assert.match(unauthorized.headers.get('www-authenticate'),/Bearer/);
+    assert.equal(body.error.type,'authentication_error');assert.equal(body.error.code,'invalid_api_key');assert.equal(body.error.param,null);
+    const generated=await fetch(`${base}/missing`,{headers:{authorization:`Bearer ${config.key}`}});assert.match(generated.headers.get('x-request-id'),/^req_[a-f0-9]+$/);
+    const missing=await generated.json();assert.equal(missing.error.code,'not_found');
+  });
+});
 test('图片输入上传后转换为 Webchat 图片字段',async()=>{
   const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
   let uploads=0;

@@ -90,11 +90,11 @@ function queryText(input){
 }
 
 export class VectorStore {
-  constructor(fileStore,{maximum=32,ttl=3600000,maxFiles=100,pdfMaxPages=200}={}){
+  constructor(fileStore,{maximum=32,ttl=3600000,maxFiles=100,pdfMaxPages=200,entries=new Map()}={}){
     if(!Number.isInteger(maximum)||maximum<0)throw new Error('向量库存储数量必须为非负整数');
     if(!Number.isFinite(ttl)||ttl<3600000)throw new Error('向量库存储有效期至少为一小时');
     if(!Number.isInteger(maxFiles)||maxFiles<1||maxFiles>10000)throw new Error('每个向量库文件数量必须为 1–10000');
-    this.fileStore=fileStore;this.maximum=maximum;this.ttl=ttl;this.maxFiles=maxFiles;this.pdfMaxPages=pdfMaxPages;this.entries=new Map();
+    this.fileStore=fileStore;this.maximum=maximum;this.ttl=ttl;this.maxFiles=maxFiles;this.pdfMaxPages=pdfMaxPages;this.entries=entries;this.prune();
   }
   prune(now=Date.now()){
     for(const [storeId,entry] of this.entries)if(entry.expiresAt<=now)this.entries.delete(storeId);
@@ -102,7 +102,7 @@ export class VectorStore {
   }
   entry(storeId,touch=false){
     this.prune();const entry=this.entries.get(storeId);if(!entry)throw failure(404,`向量库不存在或已过期：${storeId}`);
-    if(touch){entry.value.last_active_at=Math.floor(Date.now()/1000);entry.expiresAt=Date.now()+entry.ttl;entry.value.expires_at=Math.floor(entry.expiresAt/1000);}
+    if(touch){entry.value.last_active_at=Math.floor(Date.now()/1000);entry.expiresAt=Date.now()+entry.ttl;entry.value.expires_at=Math.floor(entry.expiresAt/1000);this.entries.sync?.(storeId);}
     return entry;
   }
   public(entry){
@@ -118,7 +118,7 @@ export class VectorStore {
     const entry={ttl:expires.ttl,expiresAt:now+expires.ttl,files:new Map(),batches:new Map(),value:{id:storeId,object:'vector_store',created_at:Math.floor(now/1000),name:body.name??'',usage_bytes:0,file_counts:{in_progress:0,completed:0,failed:0,cancelled:0,total:0},status:'completed',expires_after:expires.policy,expires_at:Math.floor((now+expires.ttl)/1000),last_active_at:Math.floor(now/1000),metadata:metadata(body.metadata)}};
     this.entries.set(storeId,entry);this.prune();
     try{for(const item of selected)await this.attach(storeId,typeof item==='string'?{file_id:item,chunking_strategy:body.chunking_strategy}:{...item,chunking_strategy:item.chunking_strategy??body.chunking_strategy});}catch(error){this.entries.delete(storeId);throw error;}
-    return this.public(entry);
+    this.entries.sync?.(storeId);return this.public(entry);
   }
   get(storeId){return this.public(this.entry(storeId));}
   list(options={}){this.prune();return page([...this.entries.values()].map(entry=>this.public(entry)),options);}
@@ -127,7 +127,7 @@ export class VectorStore {
     if(body.name!==undefined&&(typeof body.name!=='string'||body.name.length>256))throw failure(400,'name 必须是最长 256 字符的字符串');
     if(body.name!==undefined)entry.value.name=body.name;if(body.metadata!==undefined)entry.value.metadata=metadata(body.metadata);
     if(body.expires_after!==undefined){const expires=expiry(body.expires_after,this.ttl);entry.ttl=expires.ttl;entry.expiresAt=Date.now()+expires.ttl;entry.value.expires_after=expires.policy;entry.value.expires_at=Math.floor(entry.expiresAt/1000);}
-    return this.public(entry);
+    this.entries.sync?.(storeId);return this.public(entry);
   }
   delete(storeId){this.entry(storeId);this.entries.delete(storeId);return{id:storeId,object:'vector_store.deleted',deleted:true};}
   async attach(storeId,body){
@@ -137,25 +137,25 @@ export class VectorStore {
     const source=this.fileStore.get(body.file_id,true),strategy=chunking(body.chunking_strategy),parsed=await extractFileText(source,this.pdfMaxPages),parts=chunks(parsed.text,strategy);
     if(!parts.length)throw failure(400,`文件 ${source.filename} 没有可索引文本`);
     const value={id:source.id,object:'vector_store.file',created_at:Math.floor(Date.now()/1000),usage_bytes:Buffer.byteLength(parsed.text),vector_store_id:storeId,status:'completed',last_error:null,attributes:metadata(body.attributes,{attributes:true}),chunking_strategy:strategy.public};
-    entry.files.set(source.id,{value,filename:source.filename,mime:parsed.mime,text:parsed.text,chunks:parts});return clone(value);
+    entry.files.set(source.id,{value,filename:source.filename,mime:parsed.mime,text:parsed.text,chunks:parts});this.entries.sync?.(storeId);return clone(value);
   }
   file(storeId,fileId){const entry=this.entry(storeId);const file=entry.files.get(fileId);if(!file)throw failure(404,`向量库文件不存在：${fileId}`);return{entry,file};}
   getFile(storeId,fileId){return clone(this.file(storeId,fileId).file.value);}
   listFiles(storeId,options={}){const entry=this.entry(storeId);if(options.filter&&!['in_progress','completed','failed','cancelled'].includes(options.filter))throw failure(400,'filter 状态无效');let values=[...entry.files.values()].map(file=>file.value);if(options.filter)values=values.filter(value=>value.status===options.filter);return page(values,options);}
-  updateFile(storeId,fileId,body){object(body);keys(body,['attributes']);const {file}=this.file(storeId,fileId);file.value.attributes=metadata(body.attributes,{attributes:true});return clone(file.value);}
-  deleteFile(storeId,fileId){const {entry}=this.file(storeId,fileId);entry.files.delete(fileId);return{id:fileId,object:'vector_store.file.deleted',deleted:true};}
+  updateFile(storeId,fileId,body){object(body);keys(body,['attributes']);const {entry,file}=this.file(storeId,fileId);file.value.attributes=metadata(body.attributes,{attributes:true});this.entries.sync?.(storeId);return clone(file.value);}
+  deleteFile(storeId,fileId){const {entry}=this.file(storeId,fileId);entry.files.delete(fileId);this.entries.sync?.(storeId);return{id:fileId,object:'vector_store.file.deleted',deleted:true};}
   content(storeId,fileId){const {file}=this.file(storeId,fileId);return{file_id:fileId,filename:file.filename,attributes:clone(file.value.attributes),content:file.chunks.map(text=>({type:'text',text}))};}
   async createBatch(storeId,body){
     object(body);keys(body,['file_ids','files','attributes','chunking_strategy']);if(body.file_ids!==undefined&&body.files!==undefined)throw failure(400,'file_ids 与 files 不能同时使用');const entry=this.entry(storeId,true),selected=body.files??body.file_ids;
     if(!Array.isArray(selected)||!selected.length||selected.length>this.maxFiles)throw failure(400,`file_ids/files 必须为 1–${this.maxFiles} 项`);
     const batchId=id('vsfb'),batch={id:batchId,object:'vector_store.files_batch',created_at:Math.floor(Date.now()/1000),vector_store_id:storeId,status:'in_progress',file_counts:{in_progress:selected.length,completed:0,failed:0,cancelled:0,total:selected.length},file_ids:[]};entry.batches.set(batchId,batch);
     for(const item of selected){const value=typeof item==='string'?{file_id:item}:{...item};value.attributes??=body.attributes;value.chunking_strategy??=body.chunking_strategy;try{const attached=await this.attach(storeId,value);batch.file_ids.push(attached.id);batch.file_counts.completed++;}catch{batch.file_counts.failed++;}batch.file_counts.in_progress--;}
-    batch.status=batch.file_counts.failed===batch.file_counts.total?'failed':'completed';return this.batchPublic(batch);
+    batch.status=batch.file_counts.failed===batch.file_counts.total?'failed':'completed';this.entries.sync?.(storeId);return this.batchPublic(batch);
   }
   batch(storeId,batchId){const entry=this.entry(storeId),batch=entry.batches.get(batchId);if(!batch)throw failure(404,`向量库文件批次不存在：${batchId}`);return{entry,batch};}
   batchPublic(batch){const {file_ids,...value}=batch;return clone(value);}
   getBatch(storeId,batchId){return this.batchPublic(this.batch(storeId,batchId).batch);}
-  cancelBatch(storeId,batchId){const {batch}=this.batch(storeId,batchId);if(batch.status==='in_progress'){batch.status='cancelled';batch.file_counts.cancelled+=batch.file_counts.in_progress;batch.file_counts.in_progress=0;}return this.batchPublic(batch);}
+  cancelBatch(storeId,batchId){const {entry,batch}=this.batch(storeId,batchId);if(batch.status==='in_progress'){batch.status='cancelled';batch.file_counts.cancelled+=batch.file_counts.in_progress;batch.file_counts.in_progress=0;this.entries.sync?.(storeId);}return this.batchPublic(batch);}
   listBatchFiles(storeId,batchId,options={}){const {entry,batch}=this.batch(storeId,batchId);if(options.filter&&!['in_progress','completed','failed','cancelled'].includes(options.filter))throw failure(400,'filter 状态无效');let values=batch.file_ids.map(fileId=>entry.files.get(fileId)?.value).filter(Boolean);if(options.filter)values=values.filter(value=>value.status===options.filter);return page(values,options);}
   search(storeId,body){
     object(body);keys(body,['query','filters','max_num_results','ranking_options','rewrite_query']);const entry=this.entry(storeId,true);

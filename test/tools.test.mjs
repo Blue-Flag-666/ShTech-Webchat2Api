@@ -19,6 +19,14 @@ test('工具调用兼容围栏前说明和单块多调用',()=>{
   const fenced=parseToolCalls('调用工具：\n```json\n{"name":"weather","arguments":{"city":"上海"}}\n```',policy,()=> 'call_fenced');assert.equal(fenced.tool_calls.length,1);
   const multiple=parseToolCalls('<tool_call>[{"name":"weather","arguments":{"city":"上海"}},{"name":"weather","arguments":{"city":"北京"}}]</tool_call>',policy,()=> 'call_multi');assert.equal(multiple.tool_calls.length,2);
 });
+test('工具调用有限修复尾随逗号并遵守 max_tool_calls',()=>{
+  const repaired=parseToolCalls('<API_TOOL_CALL>\uFEFF{"name":"weather","arguments":{"city":"上海",},}</API_TOOL_CALL>',toolPolicy(tools,'required',true,2),()=> 'call_fixed');
+  assert.equal(JSON.parse(repaired.tool_calls[0].function.arguments).city,'上海');
+  const two='<tool_call>[{"name":"weather","arguments":{"city":"上海"}},{"name":"weather","arguments":{"city":"北京"}}]</tool_call>';
+  assert.throws(()=>parseToolCalls(two,toolPolicy(tools,'required',true,1),()=> 'call_limited'),/max_tool_calls=1/);
+  assert.throws(()=>parseToolCalls(two,toolPolicy(tools,'required',false,2),()=> 'call_serial'),/max_tool_calls=1/);
+  for(const limit of [0,65,1.5])assert.throws(()=>toolPolicy(tools,'auto',true,limit),/max_tool_calls/);
+});
 test('原生工具调用可保留上游 ID',()=>{
   const result=parseToolCalls('{"tool_calls":[{"id":"call_upstream","name":"weather","arguments":"{\\"city\\":\\"上海\\"}"}]}',toolPolicy(tools,'required'),()=> 'call_local');
   assert.equal(result.tool_calls[0].id,'call_upstream');

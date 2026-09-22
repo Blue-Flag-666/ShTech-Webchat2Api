@@ -18,11 +18,11 @@ function expiresAfter(value){
 }
 
 export class UploadStore{
-  constructor(fileStore,maximum=32,ttl=3600000){
+  constructor(fileStore,maximum=32,ttl=3600000,entries=new Map()){
     if(!fileStore)throw new Error('Uploads 需要 FileStore');
     if(!Number.isInteger(maximum)||maximum<0)throw new Error('上传存储数量必须为非负整数');
     if(!Number.isFinite(ttl)||ttl<=0)throw new Error('上传存储有效期必须为正数');
-    this.fileStore=fileStore;this.maximum=maximum;this.ttl=ttl;this.entries=new Map();
+    this.fileStore=fileStore;this.maximum=maximum;this.ttl=ttl;this.entries=entries;this.prune();
   }
   prune(now=Date.now()){
     for(const [id,entry] of this.entries)if(entry.expiresAt<=now)this.entries.delete(id);
@@ -45,7 +45,7 @@ export class UploadStore{
     if(bytes.length>64*1024*1024)throw failure(413,'Upload 分片不能超过 64 MiB');
     if(entry.partBytes+bytes.length>entry.value.bytes)throw failure(400,'Upload 分片总大小超过声明的 bytes');
     const partId=`part_${randomUUID().replaceAll('-','')}`,created_at=Math.floor(Date.now()/1000);
-    entry.parts.set(partId,Buffer.from(bytes));entry.partBytes+=bytes.length;
+    entry.parts.set(partId,Buffer.from(bytes));entry.partBytes+=bytes.length;this.entries.sync?.(id);
     return{id:partId,object:'upload.part',created_at,upload_id:id};
   }
   complete(id,body){
@@ -59,9 +59,9 @@ export class UploadStore{
       if(body.md5.toLowerCase()!==hex&&body.md5!==base64)throw failure(400,'Upload MD5 校验失败');
     }
     const file=this.fileStore.create({filename:entry.value.filename,mime:entry.mime,bytes,purpose:entry.value.purpose,expiresAfter:entry.fileTtl});
-    entry.value={...entry.value,status:'completed',file};entry.parts.clear();entry.partBytes=0;return clone(entry.value);
+    entry.value={...entry.value,status:'completed',file};entry.parts.clear();entry.partBytes=0;this.entries.sync?.(id);return clone(entry.value);
   }
-  cancel(id){const entry=this.entry(id);if(entry.value.status!=='pending')throw failure(400,'只能取消 pending Upload');entry.value={...entry.value,status:'cancelled'};entry.parts.clear();entry.partBytes=0;return clone(entry.value);}
+  cancel(id){const entry=this.entry(id);if(entry.value.status!=='pending')throw failure(400,'只能取消 pending Upload');entry.value={...entry.value,status:'cancelled'};entry.parts.clear();entry.partBytes=0;this.entries.sync?.(id);return clone(entry.value);}
   get size(){this.prune();return this.entries.size;}
 }
 

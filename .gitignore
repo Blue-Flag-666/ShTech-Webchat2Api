@@ -6,3 +6,4 @@ secrets/
 headers.txt
 node_modules/
 dist/
+data/

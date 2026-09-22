@@ -44,12 +44,14 @@ function usageFrom(body){
 }
 
 export class BatchStore{
-  constructor(fileStore,dispatch,{maximum=32,ttl=3600000}={}){
+  constructor(fileStore,dispatch,{maximum=32,ttl=3600000,entries=new Map()}={}){
     if(!fileStore)throw new Error('Batches 需要 FileStore');
     if(typeof dispatch!=='function')throw new Error('Batches 需要请求执行器');
     if(!Number.isInteger(maximum)||maximum<0)throw new Error('Batch 存储数量必须为非负整数');
     if(!Number.isFinite(ttl)||ttl<=0)throw new Error('Batch 存储有效期必须为正数');
-    this.fileStore=fileStore;this.dispatch=dispatch;this.maximum=maximum;this.ttl=ttl;this.entries=new Map();
+    this.fileStore=fileStore;this.dispatch=dispatch;this.maximum=maximum;this.ttl=ttl;this.entries=entries;
+    for(const [id,entry] of this.entries){entry.controller=new AbortController();if(!TERMINAL.has(entry.value.status)){entry.value.status='failed';entry.value.failed_at=Math.floor(Date.now()/1000);entry.value.errors={object:'list',data:[{code:'server_restarted',message:'服务重启时 Batch 尚未完成',param:null,line:null}]};entry.retireAt=Date.now()+this.ttl;this.entries.sync?.(id);}}
+    this.prune();
   }
   prune(now=Date.now()){
     for(const [id,entry] of this.entries)if(TERMINAL.has(entry.value.status)&&entry.retireAt<=now)this.entries.delete(id);
@@ -78,14 +80,14 @@ export class BatchStore{
   }
   cancel(id){
     const entry=this.entry(id);if(TERMINAL.has(entry.value.status)||entry.value.status==='cancelling')throw failure(400,'只能取消正在处理的 Batch');
-    entry.value.status='cancelling';entry.value.cancelling_at=Math.floor(Date.now()/1000);entry.controller.abort();return clone(entry.value);
+    entry.value.status='cancelling';entry.value.cancelling_at=Math.floor(Date.now()/1000);entry.controller.abort();this.entries.sync?.(id);return clone(entry.value);
   }
   async run(id){
     let entry;try{entry=this.entry(id);}catch{return;}
     const outputs=[],errors=[];let input_tokens=0,output_tokens=0,total_tokens=0;
     try{
       if(entry.controller.signal.aborted)return this.finishCancelled(entry,outputs,errors);
-      entry.value.status='in_progress';entry.value.in_progress_at=Math.floor(Date.now()/1000);
+      entry.value.status='in_progress';entry.value.in_progress_at=Math.floor(Date.now()/1000);this.entries.sync?.(id);
       for(const request of entry.requests){
         if(entry.controller.signal.aborted)break;
         const requestId=`batch_req_${randomUUID().replaceAll('-','')}`;
@@ -94,13 +96,13 @@ export class BatchStore{
           if(entry.controller.signal.aborted)break;
           if(result.status>=200&&result.status<300){
             outputs.push({id:`batch_req_${randomUUID().replaceAll('-','')}`,custom_id:request.custom_id,response:{status_code:result.status,request_id:result.requestId||requestId,body:result.body},error:null});entry.value.request_counts.completed++;
-            const usage=usageFrom(result.body);if(usage){input_tokens+=usage.input_tokens;output_tokens+=usage.output_tokens;total_tokens+=usage.total_tokens;}
+            const usage=usageFrom(result.body);if(usage){input_tokens+=usage.input_tokens;output_tokens+=usage.output_tokens;total_tokens+=usage.total_tokens;}this.entries.sync?.(id);
           }else{
-            errors.push({id:`batch_req_${randomUUID().replaceAll('-','')}`,custom_id:request.custom_id,response:null,error:{code:String(result.body?.error?.code||result.status),message:result.body?.error?.message||`HTTP ${result.status}`,param:result.body?.error?.param??null,line:request.line}});entry.value.request_counts.failed++;
+            errors.push({id:`batch_req_${randomUUID().replaceAll('-','')}`,custom_id:request.custom_id,response:null,error:{code:String(result.body?.error?.code||result.status),message:result.body?.error?.message||`HTTP ${result.status}`,param:result.body?.error?.param??null,line:request.line}});entry.value.request_counts.failed++;this.entries.sync?.(id);
           }
         }catch(cause){
           if(entry.controller.signal.aborted)break;
-          errors.push({id:`batch_req_${randomUUID().replaceAll('-','')}`,custom_id:request.custom_id,response:null,error:{code:'server_error',message:cause?.message||'Batch 请求失败',param:null,line:request.line}});entry.value.request_counts.failed++;
+          errors.push({id:`batch_req_${randomUUID().replaceAll('-','')}`,custom_id:request.custom_id,response:null,error:{code:'server_error',message:cause?.message||'Batch 请求失败',param:null,line:request.line}});entry.value.request_counts.failed++;this.entries.sync?.(id);
         }
       }
       entry.value.status='finalizing';entry.value.finalizing_at=Math.floor(Date.now()/1000);
@@ -108,9 +110,9 @@ export class BatchStore{
       if(errors.length)entry.value.error_file_id=this.outputFile(entry,errors,'errors').id;
       if(input_tokens||output_tokens||total_tokens)entry.value.usage={input_tokens,output_tokens,total_tokens};
       if(entry.controller.signal.aborted)return this.finishCancelled(entry,outputs,errors);
-      entry.value.status='completed';entry.value.completed_at=Math.floor(Date.now()/1000);entry.retireAt=Date.now()+this.ttl;
+      entry.value.status='completed';entry.value.completed_at=Math.floor(Date.now()/1000);entry.retireAt=Date.now()+this.ttl;this.entries.sync?.(id);
     }catch(cause){
-      entry.value.status='failed';entry.value.failed_at=Math.floor(Date.now()/1000);entry.value.errors={object:'list',data:[{code:'server_error',message:cause?.message||'Batch 处理失败',param:null,line:null}]};entry.retireAt=Date.now()+this.ttl;
+      entry.value.status='failed';entry.value.failed_at=Math.floor(Date.now()/1000);entry.value.errors={object:'list',data:[{code:'server_error',message:cause?.message||'Batch 处理失败',param:null,line:null}]};entry.retireAt=Date.now()+this.ttl;this.entries.sync?.(id);
     }
   }
   outputFile(entry,lines,suffix){
@@ -118,7 +120,7 @@ export class BatchStore{
     return this.fileStore.create({filename:`${entry.value.id}_${suffix}.jsonl`,mime:'application/jsonl',bytes,purpose:'batch_output',expiresAfter:entry.outputTtl,internal:true});
   }
   finishCancelled(entry){
-    entry.value.status='cancelled';entry.value.cancelled_at=Math.floor(Date.now()/1000);entry.retireAt=Date.now()+this.ttl;
+    entry.value.status='cancelled';entry.value.cancelled_at=Math.floor(Date.now()/1000);entry.retireAt=Date.now()+this.ttl;this.entries.sync?.(entry.value.id);
   }
   close(){for(const entry of this.entries.values())if(!TERMINAL.has(entry.value.status))entry.controller.abort();}
   get size(){this.prune();return this.entries.size;}

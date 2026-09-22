@@ -19,6 +19,12 @@ test('结构化结果解析、规范化并验证常用约束',()=>{
   assert.equal(parseStructured('结果如下：\n```json\n{"name":"测试","count":2}\n```',policy),'{"name":"测试","count":2}');
   for(const value of ['not json','[]','{"name":"","count":2}','{"name":"x","count":0}','{"name":"x","count":1,"extra":true}'])assert.throws(()=>parseStructured(value,policy));
 });
+test('结构化结果有限修复 BOM、尾随逗号并提取第一个完整值',()=>{
+  const policy={type:'json_schema',schema};
+  assert.equal(parseStructured('\uFEFF{"name":"测试","count":2,"tags":["a",],}',policy),'{"name":"测试","count":2,"tags":["a"]}');
+  assert.equal(parseStructured('说明 {"name":"测试","count":2} 后续还有 {"ignored":true}',policy),'{"name":"测试","count":2}');
+  assert.throws(()=>parseStructured('{"name":"测试","count":2,,}',policy));
+});
 test('拒绝未知关键字、外部引用和错误格式定义',()=>{
   assert.throws(()=>outputPolicy('/v1/responses',{text:{format:{type:'json_schema',name:'x',schema:{type:'object',unevaluatedProperties:false}}}}),/关键字/);
   assert.throws(()=>outputPolicy('/v1/responses',{text:{format:{type:'json_schema',name:'x',schema:{$ref:'https://example.com/schema'}}}}),/本地/);

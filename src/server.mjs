@@ -14,6 +14,7 @@ import { FileStore, expandInputFiles, parseMultipart, readRawBody, uploadedFile 
 import { UploadStore, uploadPart } from './uploads.mjs';
 import { BatchStore } from './batches.mjs';
 import { VectorStore } from './vector-stores.mjs';
+import { DiskState } from './persistence.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
 const error = (status, message) => Object.assign(new Error(message), { status });
@@ -27,21 +28,21 @@ export function configuration(env = process.env) {
     concurrency:Number(env.GENAI_CONCURRENCY || 1),queueSize:Number(env.GENAI_QUEUE_SIZE || 32),queueTimeout:Number(env.GENAI_QUEUE_TIMEOUT_MS || 120000),
     requestLimit:Number(env.GENAI_REQUEST_LIMIT_MB || 144)*1024*1024,
     responseStoreSize:Number(env.GENAI_RESPONSE_STORE_SIZE || 128),responseStoreTtl:Number(env.GENAI_RESPONSE_STORE_TTL_MS || 3600000),
-    fileStoreSize:Number(env.GENAI_FILE_STORE_SIZE || 32),fileStoreTtl:Number(env.GENAI_FILE_STORE_TTL_MS || 3600000),fileMaxBytes:Number(env.GENAI_FILE_MAX_MB || 2)*1024*1024,pdfMaxPages:Number(env.GENAI_PDF_MAX_PAGES || 200),
+    fileStoreSize:Number(env.GENAI_FILE_STORE_SIZE || 32),fileStoreTtl:Number(env.GENAI_FILE_STORE_TTL_MS || 3600000),fileMaxBytes:Number(env.GENAI_FILE_MAX_MB || 10)*1024*1024,pdfMaxPages:Number(env.GENAI_PDF_MAX_PAGES || 200),
     batchStoreSize:Number(env.GENAI_BATCH_STORE_SIZE || 32),batchStoreTtl:Number(env.GENAI_BATCH_STORE_TTL_MS || 3600000),
     vectorStoreSize:Number(env.GENAI_VECTOR_STORE_SIZE || 32),vectorStoreTtl:Number(env.GENAI_VECTOR_STORE_TTL_MS || 3600000),vectorStoreMaxFiles:Number(env.GENAI_VECTOR_STORE_MAX_FILES || 100),
-    upstreamRetries:Number(env.GENAI_UPSTREAM_RETRIES ?? 2),corsOrigin:env.CORS_ORIGIN || '' };
+    upstreamRetries:Number(env.GENAI_UPSTREAM_RETRIES ?? 2),corsOrigin:env.CORS_ORIGIN || '',dataDir:env.GENAI_DATA_DIR || '' };
 }
 
 export function upstreamBody(input, config, supportedModels, formatPolicy=null,media={}) {
   const allowed = supportedModels?.length ? supportedModels : [{ id: 'qwen-instruct', root_ai_type: 'xinference' }];
   const selected = allowed.find(x => (typeof x === 'string' ? x : x.id) === (input.model ?? 'qwen-instruct'));
   if (!selected) throw error(400, `模型不可用：${input.model}`);
-  const messages = normalizeMessages(input.messages, toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls));
+  const messages = normalizeMessages(input.messages, toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls,input.max_tool_calls));
   const partial=messages.at(-1).role==='assistant'&&messages.at(-1).partial===true;
   const dynamicTail=messages.at(-1).role==='system'&&messages.at(-1).dynamic===true&&messages.some(message=>message.role==='user');
   if (messages.at(-1).role !== 'user'&&!partial&&!dynamicTail) throw error(400, '最后一条消息必须为 user、工具结果、动态工具或 partial assistant');
-  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','max_completion_tokens','chat_group_id','net_go','tools','tool_choice','response_format','parallel_tool_calls','stream_options','temperature','top_p','top_k','min_p','presence_penalty','frequency_penalty','repetition_penalty','stop','seed','n','logprobs','top_logprobs','user','service_tier','reasoning_effort','verbosity','thinking'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
+  for (const key of Object.keys(input)) if (!['model','messages','stream','max_tokens','max_completion_tokens','max_tool_calls','chat_group_id','net_go','tools','tool_choice','response_format','parallel_tool_calls','stream_options','temperature','top_p','top_k','min_p','presence_penalty','frequency_penalty','repetition_penalty','stop','seed','n','logprobs','top_logprobs','user','service_tier','reasoning_effort','verbosity','thinking'].includes(key)) throw error(400, `暂不支持参数 ${key}`);
   if (input.stream !== undefined && typeof input.stream !== 'boolean') throw error(400, 'stream 必须是布尔值');
   if (input.net_go !== undefined && typeof input.net_go !== 'boolean') throw error(400, 'net_go 必须是布尔值');
   if (input.parallel_tool_calls !== undefined && typeof input.parallel_tool_calls !== 'boolean') throw error(400, 'parallel_tool_calls 必须是布尔值');
@@ -72,7 +73,7 @@ export function upstreamBody(input, config, supportedModels, formatPolicy=null,m
   const requestedEffort=input.thinking?.type==='disabled'?'none':input.thinking?.effort??input.reasoning_effort??(kimiK3?'max':undefined);
   const effectiveEffort=kimiK3?({none:'low',minimal:'low',medium:'high',xhigh:'max'}[requestedEffort]||requestedEffort):requestedEffort;
   const behavior=[effectiveEffort&&effectiveEffort!=='none'?`Use ${effectiveEffort} reasoning effort.`:'',input.verbosity?`Use ${input.verbosity} response verbosity.`:'',partial?'Continue from the final assistant prefix. Return only the new continuation; do not repeat the prefix.':'',dynamicTail?'Answer the most recent user request using the dynamically loaded tools when appropriate.':''].filter(Boolean).join(' ');
-  const instructions=[behavior,toolPrompt(toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls)),outputPrompt(formatPolicy)].filter(Boolean).join('\n\n');
+  const instructions=[behavior,toolPrompt(toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls,input.max_tool_calls)),outputPrompt(formatPolicy)].filter(Boolean).join('\n\n');
   const chatInfo=partial?(instructions||'Continue from the final assistant prefix and return only the continuation.')
     :dynamicTail?(instructions||'Answer the most recent user request using the dynamically loaded tools when appropriate.')
     :(instructions ? `${instructions}\n\nUser request:\n${messages.at(-1).content}` : messages.at(-1).content);
@@ -213,13 +214,15 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2) {
   }
 }
 export function createServer(config = configuration(), fetcher = upstreamFetch, modelFetcher = fetchModelList, tokenManager = new TokenManager(config), imageFetcher=fetch, frontendFetcher) {
+  const disk=config.dataDir?new DiskState(config.dataDir):null;
+  const persisted=(name,options)=>disk?.map(name,options)??new Map();
   const queue=new RequestQueue(config.concurrency??1,config.queueSize??32,config.queueTimeout??120000);
   const responseStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000);
-  const conversationStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'对话');
+  const conversationStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'对话',persisted('conversations'));
   const compactionStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'压缩状态');
   const itemReferenceStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'响应项');
-  const fileStore=new FileStore(config.fileStoreSize??32,config.fileStoreTtl??3600000,config.fileMaxBytes??2*1024*1024);
-  const uploadStore=new UploadStore(fileStore,config.fileStoreSize??32,3600000);
+  const fileStore=new FileStore(config.fileStoreSize??32,config.fileStoreTtl??3600000,config.fileMaxBytes??10*1024*1024,persisted('files'));
+  const uploadStore=new UploadStore(fileStore,config.fileStoreSize??32,3600000,persisted('uploads'));
   let server;
   async function dispatchBatch(url,body,signal,requestId){
     const address=server?.address();if(!address||typeof address!=='object')throw new Error('本地服务尚未监听');
@@ -229,8 +232,9 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     const text=await response.text();let value;try{value=JSON.parse(text);}catch{value={error:{message:text||`HTTP ${response.status}`}};}
     return{status:response.status,requestId:response.headers.get('x-request-id')||requestId,body:value};
   }
-  const batchStore=new BatchStore(fileStore,dispatchBatch,{maximum:config.batchStoreSize??32,ttl:config.batchStoreTtl??3600000});
-  const vectorStore=new VectorStore(fileStore,{maximum:config.vectorStoreSize??32,ttl:config.vectorStoreTtl??3600000,maxFiles:config.vectorStoreMaxFiles??100,pdfMaxPages:config.pdfMaxPages??200});
+  const batchEntries=persisted('batches',{encode:entry=>{const {controller,...saved}=entry;return saved;},decode:entry=>({...entry,controller:new AbortController()})});
+  const batchStore=new BatchStore(fileStore,dispatchBatch,{maximum:config.batchStoreSize??32,ttl:config.batchStoreTtl??3600000,entries:batchEntries});
+  const vectorStore=new VectorStore(fileStore,{maximum:config.vectorStoreSize??32,ttl:config.vectorStoreTtl??3600000,maxFiles:config.vectorStoreMaxFiles??100,pdfMaxPages:config.pdfMaxPages??200,entries:persisted('vector-stores')});
   const backgroundJobs=new Map();
   const backgroundStreams=new Map();
   function notifyBackground(log){log.version++;for(const notify of log.waiters)notify();log.waiters.clear();}
@@ -361,20 +365,23 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     }finally{if(backgroundJobs.get(id)===job)backgroundJobs.delete(id);}
   }
   server=http.createServer(async (req, res) => {
-    let controller, timer, release, path=req.url,requestUrl;
+    let controller, timer, release, path=req.url,requestUrl,timedOut=false;
     try {
+      const suppliedRequestId=Array.isArray(req.headers['x-request-id'])?req.headers['x-request-id'][0]:req.headers['x-request-id'];
+      const requestId=typeof suppliedRequestId==='string'&&/^[A-Za-z0-9._:-]{1,128}$/.test(suppliedRequestId)?suppliedRequestId:`req_${randomUUID().replaceAll('-','')}`;
+      res.setHeader('X-Request-Id',requestId);
       requestUrl=new URL(req.url,'http://localhost');path=requestUrl.pathname;
       if(path==='/anthropic/v1/messages')path='/v1/messages';
       if(path==='/anthropic/v1/messages/count_tokens')path='/v1/messages/count_tokens';
       const origin=req.headers.origin,allowed=config.corsOrigin==='*'||config.corsOrigin&&origin===config.corsOrigin;
-      if(allowed){res.setHeader('Access-Control-Allow-Origin',config.corsOrigin==='*'?'*':origin);res.setHeader('Access-Control-Expose-Headers','X-Usage-Source, Retry-After');res.setHeader('Vary','Origin');}
+      if(allowed){res.setHeader('Access-Control-Allow-Origin',config.corsOrigin==='*'?'*':origin);res.setHeader('Access-Control-Expose-Headers','X-Request-Id, X-Usage-Source, Retry-After');res.setHeader('Vary','Origin');}
       if(req.method==='OPTIONS'){
         if(!allowed)throw error(403,'未允许该浏览器来源');
-        res.writeHead(204,{'Access-Control-Allow-Methods':'GET, POST, DELETE, OPTIONS','Access-Control-Allow-Headers':'Accept, Authorization, Content-Type, X-API-Key, API-Key, Anthropic-Version, Anthropic-Beta, OpenAI-Organization, OpenAI-Project','Access-Control-Max-Age':'600'});return res.end();
+        res.writeHead(204,{'Access-Control-Allow-Methods':'GET, POST, DELETE, OPTIONS','Access-Control-Allow-Headers':'Accept, Authorization, Content-Type, X-API-Key, API-Key, X-Request-Id, Anthropic-Version, Anthropic-Beta, OpenAI-Organization, OpenAI-Project','Access-Control-Max-Age':'600'});return res.end();
       }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
       if (!config.key || !authorized(req, config.key, path)) throw error(401, '需要有效的本地 API Bearer 密钥');
-      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,active_batches:batchStore.active,stored_batches:batchStore.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size,stored_items:itemReferenceStore.size,stored_files:fileStore.size,pending_uploads:uploadStore.size,stored_vector_stores:vectorStore.size,indexed_vector_files:vectorStore.fileCount });
+      if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ok', upstream_configured: tokenManager.configured,persistence_enabled:Boolean(disk),active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,active_batches:batchStore.active,stored_batches:batchStore.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size,stored_items:itemReferenceStore.size,stored_files:fileStore.size,pending_uploads:uploadStore.size,stored_vector_stores:vectorStore.size,indexed_vector_files:vectorStore.fileCount });
       if(req.method==='POST'&&path==='/v1/uploads')return json(res,200,uploadStore.create(await readBody(req,config.requestLimit)));
       const uploadMatch=/^\/v1\/uploads\/([^/]+)\/(parts|complete|cancel)$/.exec(path);
       if(uploadMatch){
@@ -604,7 +611,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         if (!res.headersSent) res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
         await write(res,frame);
       },media.input,{fileSearchItem:fileSearch?.item}) : null;
-      const policy = toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls);
+      const policy = toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls,input.max_tool_calls);
       const catalogue = await models();
       if (!catalogue.length) throw error(503, '模型目录没有已确认的自部署国内模型');
       const selected=catalogue.find(model=>model.id===(input.model??'qwen-instruct'));
@@ -628,7 +635,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       controller = new AbortController();
       res.on('close', () => {if(!res.writableEnded)controller.abort();});
       release=await queue.acquire(controller.signal);
-      timer = setTimeout(() => controller.abort(), config.timeout);
+      timer = setTimeout(() => {timedOut=true;controller.abort();}, config.timeout);
       const accessToken=await tokenManager.get();
       const imagePayload=await prepareImages(media.images,config,accessToken,controller.signal,imageFetcher,frontendFetcher);
       const body = upstreamBody(input, config, catalogue, formatPolicy,imagePayload);
@@ -741,14 +748,16 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         json(res,200,result);
       }
     } catch (e) {
-      const status = e.status || (controller?.signal.aborted ? 504 : 502);
-      const payload = { ...(path === '/v1/messages' ? {type:'error'} : {}), error: { message: e.status ? e.message : status === 504 ? '上游请求超时或已取消' : '无法连接上游服务', type: status === 400 ? 'invalid_request_error' : status === 401 ? 'authentication_error' : status === 404 ? 'not_found_error' : status === 429 ? 'rate_limit_error' : 'api_error', code: status } };
+      const status = e.status || (controller?.signal.aborted ? timedOut?504:499 : 502),message=e.status?e.message:status===504?'上游请求超时':status===499?'客户端已断开':'无法连接上游服务';
+      const codes={400:'invalid_request',401:'invalid_api_key',403:'permission_denied',404:'not_found',405:'method_not_allowed',409:'conflict',413:'request_too_large',429:'rate_limit_exceeded',499:'client_closed_request',502:'upstream_error',503:'service_unavailable',504:'timeout'},code=e.code||codes[status]||'server_error';
+      const types={400:'invalid_request_error',401:'authentication_error',403:'permission_error',404:'not_found_error',405:'invalid_request_error',409:'conflict_error',413:'request_too_large',429:'rate_limit_error',499:'api_error',502:'api_error',503:'overloaded_error',504:'api_error'};
+      const payload = { ...(path === '/v1/messages' ? {type:'error'} : {}), error: { message,type:types[status]||'api_error',param:e.param??null,code } };
       if (!res.destroyed) {
         if(res.headersSent){
           if(['/v1/chat/completions','/v1/completions'].includes(path))res.end(`data: ${JSON.stringify(payload)}\n\n`);
-          else if(path==='/v1/responses')res.end(`event: error\ndata: ${JSON.stringify({type:'error',code:String(status),message:payload.error.message,param:null})}\n\n`);
+          else if(path==='/v1/responses')res.end(`event: error\ndata: ${JSON.stringify({type:'error',code,message,param:e.param??null})}\n\n`);
           else res.end(`event: error\ndata: ${JSON.stringify(payload)}\n\n`);
-        } else {if(status===401)res.setHeader('WWW-Authenticate','Bearer');if(status===429)res.setHeader('Retry-After',Math.max(1,Math.ceil((config.queueTimeout??120000)/1000)));json(res, status, payload);}
+        } else {if(status===401)res.setHeader('WWW-Authenticate','Bearer');if(status===429)res.setHeader('Retry-After',String(e.retryAfter??1));json(res, status, payload);}
       }
     } finally { clearTimeout(timer); controller?.abort(); release?.(); }
   });
@@ -769,7 +778,7 @@ export function startServer(config = configuration()) {
   if (!Number.isFinite(config.responseStoreTtl) || config.responseStoreTtl <= 0) throw new Error('GENAI_RESPONSE_STORE_TTL_MS 必须为正数');
   if (!Number.isInteger(config.fileStoreSize) || config.fileStoreSize < 0 || config.fileStoreSize > 1000) throw new Error('GENAI_FILE_STORE_SIZE 必须为 0–1000 的整数');
   if (!Number.isFinite(config.fileStoreTtl) || config.fileStoreTtl < 3600000 || config.fileStoreTtl > 2592000000) throw new Error('GENAI_FILE_STORE_TTL_MS 必须为 1 小时–30 天');
-  if (!Number.isInteger(config.fileMaxBytes) || config.fileMaxBytes < 1024 || config.fileMaxBytes > 20*1048576) throw new Error('GENAI_FILE_MAX_MB 必须为 0.001–20');
+  if (!Number.isInteger(config.fileMaxBytes) || config.fileMaxBytes < 1024 || config.fileMaxBytes > 10*1048576) throw new Error('GENAI_FILE_MAX_MB 必须为 0.001–10');
   if (!Number.isInteger(config.pdfMaxPages) || config.pdfMaxPages < 1 || config.pdfMaxPages > 2000) throw new Error('GENAI_PDF_MAX_PAGES 必须为 1–2000 的整数');
   if (!Number.isInteger(config.batchStoreSize) || config.batchStoreSize < 0 || config.batchStoreSize > 1000) throw new Error('GENAI_BATCH_STORE_SIZE 必须为 0–1000 的整数');
   if (!Number.isFinite(config.batchStoreTtl) || config.batchStoreTtl < 3600000 || config.batchStoreTtl > 2592000000) throw new Error('GENAI_BATCH_STORE_TTL_MS 必须为 1 小时–30 天');

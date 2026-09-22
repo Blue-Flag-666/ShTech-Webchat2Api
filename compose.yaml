@@ -10,9 +10,13 @@ services:
       PORT: 8787
     ports:
       - "127.0.0.1:${PORT:-8787}:8787"
+    volumes:
+      - shtech-webchat-data:/data
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,size=16m
     security_opt:
       - no-new-privileges:true
     cap_drop: ["ALL"]
+volumes:
+  shtech-webchat-data:

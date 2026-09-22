@@ -168,6 +168,26 @@ test('Chat 兼容旧版 functions/function_call，Responses 接受常用选项',
   const response=normalizeRequest('/v1/responses',{input:'x',temperature:.5,top_p:.9,service_tier:'auto',safety_identifier:'local'});
   assert.equal(response.temperature,.5);assert.equal(response.top_p,.9);
 });
+test('Responses 校验长尾字段并保留工具调用上限',()=>{
+  const value=normalizeRequest('/v1/responses',{input:'x',stream:true,stream_options:{include_obfuscation:false},max_output_tokens:32,max_tool_calls:2,metadata:{task:'code'},reasoning:{effort:'high',summary:'concise'},text:{verbosity:'low'},service_tier:'default',safety_identifier:'local-user',prompt_cache_key:'workspace'});
+  assert.equal(value.max_tokens,32);assert.equal(value.max_tool_calls,2);assert.equal(value.verbosity,'low');
+  for(const request of [
+    {input:'x',stream_options:{include_obfuscation:false}},
+    {input:'x',max_tool_calls:0},
+    {input:'x',metadata:{task:1}},
+    {input:'x',reasoning:{summary:'short'}},
+    {input:'x',text:{verbosity:'verbose'}},
+    {input:'x',service_tier:'unknown'}
+  ])assert.throws(()=>normalizeRequest('/v1/responses',request));
+});
+test('Responses 长尾字段回显，流选项可生成混淆填充',async()=>{
+  await fixture(async call=>{
+    const body={input:'x',stream:true,stream_options:{include_obfuscation:true},max_tool_calls:2,metadata:{task:'code'},reasoning:{summary:'concise'},text:{verbosity:'low'},service_tier:'default',safety_identifier:'local-user',prompt_cache_key:'workspace'};
+    const frames=(await Array.fromAsync(events((await call('/v1/responses',body)).body))).map(frame=>JSON.parse(frame.data));
+    assert.ok(frames.every(frame=>typeof frame.obfuscation==='string'&&frame.obfuscation.length>0));
+    const response=frames.at(-1).response;assert.equal(response.max_tool_calls,2);assert.deepEqual(response.metadata,{task:'code'});assert.equal(response.reasoning.summary,'concise');assert.equal(response.safety_identifier,'local-user');assert.equal(response.prompt_cache_key,'workspace');
+  });
+});
 test('Responses reasoning 与 Anthropic thinking 转成推理强度',()=>{
   assert.equal(normalizeRequest('/v1/responses',{input:'x',reasoning:{effort:'high'}}).reasoning_effort,'high');
   assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,thinking:{type:'enabled',budget_tokens:16}}).reasoning_effort,'high');

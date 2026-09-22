@@ -1,10 +1,10 @@
 const failure=(status,message)=>Object.assign(new Error(message),{status});
 
 export class ResponseStore {
-  constructor(maximum=128,ttl=60*60*1000,label='响应'){
+  constructor(maximum=128,ttl=60*60*1000,label='响应',entries=new Map()){
     if(!Number.isInteger(maximum)||maximum<0)throw new Error('响应存储数量必须为非负整数');
     if(!Number.isFinite(ttl)||ttl<=0)throw new Error('响应存储有效期必须为正数');
-    this.maximum=maximum;this.ttl=ttl;this.label=label;this.entries=new Map();
+    this.maximum=maximum;this.ttl=ttl;this.label=label;this.entries=entries;this.prune();
   }
   prune(now=Date.now()){
     for(const [id,entry] of this.entries)if(entry.expires<=now)this.entries.delete(id);

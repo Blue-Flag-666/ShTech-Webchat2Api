@@ -136,12 +136,19 @@ export function normalizeRequest(path, input) {
   }
   const out = { model: input.model, stream: input.stream, messages: [] };
   if (path === '/v1/responses') {
-    keys(input, ['model','input','instructions','stream','max_output_tokens','tools','tool_choice','store','previous_response_id','metadata','reasoning','text','parallel_tool_calls','include','temperature','top_p','service_tier','safety_identifier','prompt_cache_key','user','background','conversation','truncation','context_management']);
+    keys(input, ['model','input','instructions','stream','stream_options','max_output_tokens','max_tool_calls','tools','tool_choice','store','previous_response_id','metadata','reasoning','text','parallel_tool_calls','include','temperature','top_p','service_tier','safety_identifier','prompt_cache_key','user','background','conversation','truncation','context_management']);
     if (input.store !== undefined && typeof input.store !== 'boolean') throw bad('store 必须为布尔值');
+    if(input.stream!==undefined&&typeof input.stream!=='boolean')throw bad('stream 必须为布尔值');
+    if(input.stream_options!==undefined&&(!input.stream||!input.stream_options||typeof input.stream_options!=='object'||Array.isArray(input.stream_options)||Object.keys(input.stream_options).some(key=>key!=='include_obfuscation')||typeof input.stream_options.include_obfuscation!=='boolean'))throw bad('stream_options 仅支持流式 include_obfuscation 布尔值');
+    if(input.max_output_tokens!==undefined&&(!Number.isInteger(input.max_output_tokens)||input.max_output_tokens<1))throw bad('max_output_tokens 必须为正整数');
+    if(input.max_tool_calls!==undefined&&(!Number.isInteger(input.max_tool_calls)||input.max_tool_calls<1||input.max_tool_calls>64))throw bad('max_tool_calls 必须是 1–64 的整数');
     if(input.background!==undefined&&typeof input.background!=='boolean')throw bad('background 必须为布尔值');
     if(input.truncation!==undefined&&!['auto','disabled'].includes(input.truncation))throw bad('truncation 必须为 auto 或 disabled');
     if(input.context_management!==undefined&&(!Array.isArray(input.context_management)||input.context_management.some(item=>!item||item.type!=='compaction'||item.compact_threshold!==undefined&&(!Number.isInteger(item.compact_threshold)||item.compact_threshold<1))))throw bad('context_management 仅支持 compaction 和正整数 compact_threshold');
     if (input.previous_response_id !== undefined && (typeof input.previous_response_id!=='string'||!input.previous_response_id)) throw bad('previous_response_id 必须是非空字符串');
+    if(input.metadata!==undefined&&(!input.metadata||typeof input.metadata!=='object'||Array.isArray(input.metadata)||Object.keys(input.metadata).length>16||Object.entries(input.metadata).some(([key,value])=>!key||key.length>64||typeof value!=='string'||value.length>512)))throw bad('metadata 必须是最多 16 个短字符串键值');
+    for(const key of ['safety_identifier','prompt_cache_key'])if(input[key]!==undefined&&(typeof input[key]!=='string'||!input[key]||input[key].length>64))throw bad(`${key} 必须是 1–64 字符字符串`);
+    if(input.service_tier!==undefined&&!['auto','default','flex','priority'].includes(input.service_tier))throw bad('service_tier 无效');
     if (input.instructions != null) out.messages.push({role:'system',content:text(input.instructions)});
     const items = typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
     if (!Array.isArray(items)) throw bad('input 必须为字符串或输入项数组');
@@ -194,14 +201,21 @@ export function normalizeRequest(path, input) {
     if (input.parallel_tool_calls!==undefined && typeof input.parallel_tool_calls!=='boolean') throw bad('parallel_tool_calls 必须为布尔值');
     if (input.include!==undefined && (!Array.isArray(input.include) || input.include.some(value=>!['reasoning.encrypted_content','web_search_call.results','web_search_call.action.sources','file_search_call.results'].includes(value)))) throw bad('include 包含不支持的字段');
     out.parallel_tool_calls=input.parallel_tool_calls;
+    out.max_tool_calls=input.max_tool_calls;
     out.max_tokens = input.max_output_tokens;
     out.temperature=input.temperature;out.top_p=input.top_p;out.service_tier=input.service_tier;out.user=input.user;
     if(input.reasoning!==undefined){
       if(!input.reasoning||typeof input.reasoning!=='object'||Array.isArray(input.reasoning))throw bad('reasoning 必须是对象');
+      if(Object.keys(input.reasoning).some(key=>!['effort','summary'].includes(key)))throw bad('reasoning 包含不支持的字段');
       if(input.reasoning.effort!==undefined&&!['none','minimal','low','medium','high','xhigh','max'].includes(input.reasoning.effort))throw bad('reasoning.effort 无效');
+      if(input.reasoning.summary!==undefined&&!['auto','concise','detailed'].includes(input.reasoning.summary))throw bad('reasoning.summary 无效');
       out.reasoning_effort=input.reasoning.effort;
     }
-    if(input.text?.verbosity!==undefined)out.verbosity=input.text.verbosity;
+    if(input.text!==undefined){
+      if(!input.text||typeof input.text!=='object'||Array.isArray(input.text)||Object.keys(input.text).some(key=>!['format','verbosity'].includes(key)))throw bad('text 配置无效');
+      if(input.text.verbosity!==undefined&&!['low','medium','high'].includes(input.text.verbosity))throw bad('text.verbosity 无效');
+      out.verbosity=input.text.verbosity;
+    }
   } else {
     keys(input, ['model','messages','system','stream','max_tokens','tools','tool_choice','metadata','thinking','output_config','temperature','top_p','top_k','stop_sequences']);
     if (!Number.isInteger(input.max_tokens) || input.max_tokens < 1) throw bad('max_tokens 必须为正整数');
@@ -275,7 +289,7 @@ export class ProtocolOutput {
     collect(original.tools);
   }
   async event(type, data={}) {
-    const value={type,...data,...(this.path === '/v1/responses' ? {sequence_number:this.sequence++} : {})};
+    const value={type,...data,...(this.path === '/v1/responses' ? {sequence_number:this.sequence++,...(this.original.stream_options?.include_obfuscation===true?{obfuscation:randomUUID().replaceAll('-','')}: {})} : {})};
     await this.emit(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
   }
   response(output=[],status='in_progress',usage=null) {
@@ -285,10 +299,11 @@ export class ProtocolOutput {
       incomplete_details:status === 'incomplete' ? {reason:'max_output_tokens'} : null,
       model:this.input.model || 'qwen-instruct',output,usage,store:this.original.store!==false,parallel_tool_calls:this.original.parallel_tool_calls ?? true,
       tool_choice:this.original.tool_choice ?? 'auto',tools:this.original.tools || [],metadata:this.metadata,
-      reasoning:{effort:this.original.reasoning?.effort??null,summary:this.reasoning? 'auto':null},output_text:outputText,
-      instructions:this.original.instructions??null,max_output_tokens:this.original.max_output_tokens??null,
+      reasoning:{effort:this.original.reasoning?.effort??null,summary:this.original.reasoning?.summary??(this.reasoning?'auto':null)},output_text:outputText,
+      instructions:this.original.instructions??null,max_output_tokens:this.original.max_output_tokens??null,max_tool_calls:this.original.max_tool_calls??null,
       text:this.original.text??null,temperature:this.original.temperature??null,top_p:this.original.top_p??null,
-      previous_response_id:this.original.previous_response_id??null,background:this.original.background===true,conversation:this.original.conversation?{id:typeof this.original.conversation==='string'?this.original.conversation:this.original.conversation.id}:null,service_tier:this.original.service_tier??null,truncation:this.original.truncation??'disabled'};
+      previous_response_id:this.original.previous_response_id??null,prompt_cache_key:this.original.prompt_cache_key??null,safety_identifier:this.original.safety_identifier??null,
+      background:this.original.background===true,conversation:this.original.conversation?{id:typeof this.original.conversation==='string'?this.original.conversation:this.original.conversation.id}:null,service_tier:this.original.service_tier??null,truncation:this.original.truncation??'disabled'};
   }
   message(content=[],stop_reason=null,usage={input_tokens:0,output_tokens:0}) {
     return {id:this.id,type:'message',role:'assistant',model:this.input.model || 'qwen-instruct',content,stop_reason,stop_sequence:null,usage:{cache_creation_input_tokens:0,cache_read_input_tokens:0,...usage}};

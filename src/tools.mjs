@@ -2,7 +2,8 @@ import { validateSchemaValue } from './structured.mjs';
 
 const invalid = message => Object.assign(new Error(message), { status: 400 });
 const upstreamError = message => Object.assign(new Error(message), { status: 502 });
-export function toolPolicy(tools, choice = 'auto', parallel = true) {
+export function toolPolicy(tools, choice = 'auto', parallel = true, maxCalls = 64) {
+  if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > 64) throw invalid('max_tool_calls 必须是 1–64 的整数');
   if (tools === undefined) {
     if (choice !== 'auto' && choice !== 'none') throw invalid('tool_choice 需要 tools');
     return null;
@@ -23,12 +24,31 @@ export function toolPolicy(tools, choice = 'auto', parallel = true) {
   } else if (!['auto','none','required'].includes(choice)) throw invalid('无效 tool_choice');
   if (required && !names.size) throw invalid('required 至少需要一个工具');
   if (choice === 'none' || !names.size) return null;
-  return { tools: tools.filter(t=>allowed.has(t.function.name)), allowed, required,parallel:parallel!==false,
+  return { tools: tools.filter(t=>allowed.has(t.function.name)), allowed, required,parallel:parallel!==false,maxCalls:parallel===false?1:maxCalls,
     custom:new Set(tools.filter(t=>t.custom&&allowed.has(t.function.name)).map(t=>t.function.name)) };
 }
 export function toolPrompt(policy) {
   if (!policy) return '';
-  return `You may request external tools by writing literal text blocks in this format:\n<api_tool_call>{"name":"tool_name","arguments":{}}</api_tool_call>\nUse only the declared tools and JSON objects for arguments. Do not claim to have executed tools. ${policy.required ? 'You must write at least one api_tool_call block.' : 'If no tool is needed, reply normally.'} ${policy.parallel?'You may request multiple independent tools.':'Request at most one tool.'}\nTool declarations:\n${JSON.stringify(policy.tools.map(t=>t.function))}`;
+  return `You may request external tools by writing literal text blocks in this format:\n<api_tool_call>{"name":"tool_name","arguments":{}}</api_tool_call>\nUse only the declared tools and JSON objects for arguments. Do not claim to have executed tools. ${policy.required ? 'You must write at least one api_tool_call block.' : 'If no tool is needed, reply normally.'} ${policy.parallel?`You may request up to ${policy.maxCalls} independent tools.`:'Request at most one tool.'}\nTool declarations:\n${JSON.stringify(policy.tools.map(t=>t.function))}`;
+}
+
+// Repair only a common serialization mistake outside JSON strings. Broader
+// rewriting could change tool arguments and is deliberately rejected.
+function parseModelJson(value) {
+  const source=String(value).replace(/^\uFEFF/,'').trim();
+  try{return JSON.parse(source);}catch{}
+  let repaired='',quoted=false,escaped=false;
+  for(let index=0;index<source.length;index++){
+    const character=source[index];
+    if(quoted){repaired+=character;if(escaped)escaped=false;else if(character==='\\')escaped=true;else if(character==='"')quoted=false;continue;}
+    if(character==='"'){quoted=true;repaired+=character;continue;}
+    if(character===','){
+      let next=index+1;while(/\s/.test(source[next]||''))next++;
+      if(source[next]==='}'||source[next]===']')continue;
+    }
+    repaired+=character;
+  }
+  return JSON.parse(repaired);
 }
 export function parseToolCalls(text, policy, makeId) {
   if (!policy) return { content: text, tool_calls: [] };
@@ -37,7 +57,7 @@ export function parseToolCalls(text, policy, makeId) {
     const value=parsed?.function?{name:parsed.function.name,arguments:parsed.function.arguments}:parsed;
     if (!policy.allowed.has(value?.name)) return false;
     let args=value.arguments;
-    if(typeof args==='string'){try{args=JSON.parse(args);}catch{throw upstreamError('模型输出了无法解析的工具参数');}}
+    if(typeof args==='string'){try{args=parseModelJson(args);}catch{throw upstreamError('模型输出了无法解析的工具参数');}}
     if(!args||typeof args!=='object'||Array.isArray(args))throw upstreamError('模型输出了无效工具参数');
     if(policy.custom?.has(value.name)&&typeof args.input!=='string')throw upstreamError('模型输出了无效的 custom 工具文本参数');
     const declaration=policy.tools.find(tool=>tool.function.name===value.name);
@@ -50,23 +70,23 @@ export function parseToolCalls(text, policy, makeId) {
       do{callId=`${base}_${suffix++}`;}while(calls.some(call=>call.id===callId));
     }
     calls.push({id:callId,type:'function',function:{name:value.name,arguments:JSON.stringify(args)}});
-    if(calls.length>64)throw upstreamError('模型工具调用数量超过限制');
+    if(calls.length>policy.maxCalls)throw upstreamError(`模型工具调用数量超过 max_tool_calls=${policy.maxCalls}`);
     return true;
   };
-  const content = text.replace(/<(api_tool_call|tool_call)>([\s\S]*?)<\/\1>/g, (_,tag,raw)=>{
+  const content = text.replace(/<\s*(api_tool_call|tool_call)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi, (_,tag,raw)=>{
     let parsed;
-    try { parsed=JSON.parse(raw); } catch { throw upstreamError('模型输出了无法解析的工具调用'); }
+    try { parsed=parseModelJson(raw); } catch { throw upstreamError('模型输出了无法解析的工具调用'); }
     const values=Array.isArray(parsed)?parsed:[parsed];
     if(!values.length||values.some(value=>!add(value)))throw upstreamError('模型输出了不允许的工具');
     return '';
   }).trim();
-  if (/<\/?(?:api_tool_call|tool_call)>/.test(content)) throw upstreamError('工具调用块未完整结束');
+  if (/<\s*\/?\s*(?:api_tool_call|tool_call)\b/i.test(content)) throw upstreamError('工具调用块未完整结束');
   let remaining=content;
   if(!calls.length){
     const fenced=[...content.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(match=>match[1]);
     const candidates=[content,content.replace(/^```(?:json)?\s*|\s*```$/gi,''),...fenced];
     for(const candidate of candidates){
-      let parsed;try{parsed=JSON.parse(candidate);}catch{continue;}
+      let parsed;try{parsed=parseModelJson(candidate);}catch{continue;}
       const values=Array.isArray(parsed)?parsed:Array.isArray(parsed?.tool_calls)?parsed.tool_calls:[parsed];
       if(values.length&&values.every(value=>policy.allowed.has(value?.name||value?.function?.name))){for(const value of values)add(value);remaining='';break;}
     }

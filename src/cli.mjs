@@ -7,7 +7,7 @@ import { Writable } from 'node:stream';
 import { createInterface } from 'node:readline/promises';
 import { configuration, startServer } from './server.mjs';
 
-const VERSION = '0.14.0';
+const VERSION = '0.15.0';
 const sea = isSea();
 const defaultConfig = sea ? join(dirname(process.execPath), '.env') : resolve('.env');
 
@@ -107,6 +107,7 @@ async function main() {
     await configure(options.config);
     process.loadEnvFile(options.config);
   }
+  if(!process.env.GENAI_DATA_DIR)process.env.GENAI_DATA_DIR=join(dirname(options.config),'data');
   if(!configured(process.env))throw new Error(`配置不完整：${options.config}`);
   if(options.command!=='start')return inspect(options.command,options.config);
   const server = startServer();

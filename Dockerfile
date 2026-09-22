@@ -20,8 +20,10 @@ COPY THIRD_PARTY_LICENSES/fflate.txt /usr/share/licenses/fflate/LICENSE
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
-    PORT=8787
+    PORT=8787 \
+    GENAI_DATA_DIR=/data
 WORKDIR /app
+VOLUME ["/data"]
 
 # Runtime-only image: npm, Corepack, headers and tests stay in the build stage.
 COPY --chown=node:node package.json .env.example ./

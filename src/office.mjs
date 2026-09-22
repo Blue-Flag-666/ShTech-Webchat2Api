@@ -30,9 +30,9 @@ function archive(bytes){
 }
 
 function entity(value){
-  return value.replace(/&(?:#(x[\da-f]+|\d+)|amp|lt|gt|quot|apos);/gi,(match,numeric)=>{
+  return value.replace(/&(?:#(x[\da-f]+|\d+)|amp|lt|gt|quot|apos|nbsp);/gi,(match,numeric)=>{
     if(numeric){const hex=numeric[0].toLowerCase()==='x',code=Number.parseInt(hex?numeric.slice(1):numeric,hex?16:10);return Number.isFinite(code)&&code<=0x10ffff?String.fromCodePoint(code):'';}
-    return {'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&apos;':"'"}[match.toLowerCase()]??match;
+    return {'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&apos;':"'",'&nbsp;':' '}[match.toLowerCase()]??match;
   });
 }
 
@@ -133,3 +133,8 @@ export function extractOfficeText(file,type){
   if(type==='xlsx')return{text:xlsx(files),mime:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'};
   fail('不支持的 Office 文件类型');
 }
+
+export const openDocumentArchive=archive;
+export const decodeDocumentXml=xml;
+export const decodeXmlEntities=entity;
+export const cleanExtractedText=clean;

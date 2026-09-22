@@ -138,14 +138,49 @@ export function validateSchemaValue(value,schema) {
   return value;
 }
 
+function parseModelJson(value) {
+  const source=value.replace(/^\uFEFF/,'').trim();
+  try{return JSON.parse(source);}catch{}
+  let repaired='',quoted=false,escaped=false;
+  for(let index=0;index<source.length;index++){
+    const character=source[index];
+    if(quoted){repaired+=character;if(escaped)escaped=false;else if(character==='\\')escaped=true;else if(character==='"')quoted=false;continue;}
+    if(character==='"'){quoted=true;repaired+=character;continue;}
+    if(character===','){
+      let next=index+1;while(/\s/.test(source[next]||''))next++;
+      if(source[next]==='}'||source[next]===']')continue;
+    }
+    repaired+=character;
+  }
+  return JSON.parse(repaired);
+}
+
+function jsonValues(source) {
+  const values=[];
+  for(let start=0;start<source.length;start++){
+    if(source[start]!=='{'&&source[start]!=='[')continue;
+    const stack=[];let quoted=false,escaped=false;
+    for(let index=start;index<source.length;index++){
+      const character=source[index];
+      if(quoted){if(escaped)escaped=false;else if(character==='\\')escaped=true;else if(character==='"')quoted=false;continue;}
+      if(character==='"'){quoted=true;continue;}
+      if(character==='{'||character==='[')stack.push(character);
+      else if(character==='}'||character===']'){
+        const opening=stack.pop();
+        if((opening==='{'&&character!=='}')||(opening==='['&&character!==']'))break;
+        if(!stack.length){values.push(source.slice(start,index+1));start=index;break;}
+      }
+    }
+  }
+  return values;
+}
+
 export function parseStructured(content,policy) {
   if(!policy)return content;
   if(typeof content!=='string')throw failed('模型没有返回有效 JSON');
   const fenced=[...content.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(match=>match[1]);
-  let value;const candidates=[content,content.trim().replace(/^```(?:json)?\s*|\s*```$/gi,''),...fenced];
-  const start=content.search(/[\[{]/),end=Math.max(content.lastIndexOf('}'),content.lastIndexOf(']'));
-  if(start>=0&&end>start)candidates.push(content.slice(start,end+1));
-  for(const candidate of candidates){try{value=JSON.parse(candidate);break;}catch{}}
+  let value;const candidates=[content,content.trim().replace(/^```(?:json)?\s*|\s*```$/gi,''),...fenced,...jsonValues(content)];
+  for(const candidate of candidates){try{value=parseModelJson(candidate);break;}catch{}}
   if(value===undefined)throw failed('模型没有返回有效 JSON');
   if(policy.type==='json_object' && (!value || typeof value!=='object' || Array.isArray(value)))throw failed('模型没有返回 JSON 对象');
   validate(value,policy.schema,policy.schema);

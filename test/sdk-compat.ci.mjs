@@ -85,8 +85,8 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     const chatStream=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}],stream:true,stream_options:{include_usage:true}});
     let chatText='',usage;for await(const chunk of chatStream){chatText+=chunk.choices[0]?.delta?.content || '';usage=chunk.usage || usage;}
     assert.equal(chatText,'你好');assert.equal(usage.total_tokens,3);
-    const response=await client.responses.create({model:'qwen-instruct',input:'你好',store:false});
-    assert.equal(response.output[0].content[0].text,'你好');
+    const response=await client.responses.create({model:'qwen-instruct',input:'你好',store:false,max_tool_calls:2,metadata:{task:'sdk'},reasoning:{summary:'concise'},text:{verbosity:'low'},service_tier:'default',safety_identifier:'sdk-user',prompt_cache_key:'sdk-workspace'});
+    assert.equal(response.output[0].content[0].text,'你好');assert.equal(response.max_tool_calls,2);assert.deepEqual(response.metadata,{task:'sdk'});assert.equal(response.prompt_cache_key,'sdk-workspace');
     const stored=await client.responses.create({model:'qwen-instruct',input:'默认保存'});assert.equal(stored.store,true);
     assert.equal((await client.responses.retrieve(stored.id)).id,stored.id);
     const conversation=await client.conversations.create({metadata:{project:'sdk'},items:[{type:'message',role:'user',content:'旧问题'}]});
@@ -96,8 +96,9 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     assert.equal((await client.conversations.delete(conversation.id)).deleted,true);
     const tokenCount=await client.responses.inputTokens.count({model:'qwen-instruct',input:'你好'});assert.equal(tokenCount.object,'response.input_tokens');assert.ok(tokenCount.input_tokens>0);
     const compacted=await client.responses.compact({model:'qwen-instruct',input:'需要压缩的任务'});assert.equal(compacted.object,'response.compaction');assert.equal(compacted.output.at(-1).type,'compaction');
-    const responseStream=await client.responses.create({model:'qwen-instruct',input:'你好',store:false,stream:true});
-    let responseText='';for await(const event of responseStream)if(event.type==='response.output_text.delta')responseText+=event.delta;
+    const responseStream=await client.responses.create({model:'qwen-instruct',input:'你好',store:false,stream:true,stream_options:{include_obfuscation:true}});
+    let responseText='',obfuscated=0;for await(const event of responseStream){if(event.type==='response.output_text.delta')responseText+=event.delta;if(event.obfuscation)obfuscated++;}
+    assert.ok(obfuscated>0);
     assert.equal(responseText,'你好');
   });
 });
