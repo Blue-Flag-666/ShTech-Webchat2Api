@@ -72,7 +72,7 @@ export class FileStore {
   create({filename,mime,bytes,purpose='user_data',expiresAfter,internal=false}){
     if(!this.maximum)throw failure(400,'文件存储已禁用');
     if(!Buffer.isBuffer(bytes)||!bytes.length)throw failure(400,'上传文件不能为空');
-    if(bytes.length>this.maxBytes)throw failure(413,`单个文件不能超过 ${Math.ceil(this.maxBytes/1048576)} MiB`);
+    if(bytes.length>=this.maxBytes)throw failure(413,`单个文件必须小于 ${Math.ceil(this.maxBytes/1048576)} MiB`);
     if(!FILE_PURPOSES.has(purpose)&&!(internal&&INTERNAL_FILE_PURPOSES.has(purpose)))throw failure(400,'文件 purpose 无效');
     const created=Date.now(),ttl=expiresAfter??this.ttl,id=`file-${randomUUID().replaceAll('-','')}`;
     if(!Number.isInteger(ttl)||ttl<3600000||ttl>2592000000)throw failure(400,'expires_after.seconds 必须为 3600–2592000');
@@ -136,7 +136,7 @@ function inlineFile(part,store){
   const match=/^data:([^;,]+)(?:;charset=[^;,]+)?;base64,([A-Za-z0-9+/=\s]+)$/.exec(part.file_data);
   if(!match)throw failure(400,'input_file.file_data 必须是 Base64 data URL');
   const encoded=match[2].replace(/\s/g,'');if(encoded.length%4||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded))throw failure(400,'input_file.file_data Base64 无效');
-  const bytes=Buffer.from(encoded,'base64');if(!bytes.length||bytes.length>store.maxBytes)throw failure(413,`输入文件不能超过 ${Math.ceil(store.maxBytes/1048576)} MiB`);
+  const bytes=Buffer.from(encoded,'base64');if(!bytes.length||bytes.length>=store.maxBytes)throw failure(413,`输入文件必须小于 ${Math.ceil(store.maxBytes/1048576)} MiB`);
   return{filename:cleanFilename(part.filename),mime:match[1].toLowerCase(),bytes};
 }
 
@@ -149,7 +149,7 @@ function storedImage(fileId,store){
 export async function expandInputFiles(path,input,store,{pdfMaxPages=200}={}){
   if(!Number.isInteger(pdfMaxPages)||pdfMaxPages<1)throw new Error('PDF 页数上限必须为正整数');
   const value=structuredClone(input);let totalBytes=0;
-  const inputFile=part=>{const file=inlineFile(part,store);totalBytes+=file.bytes.length;if(totalBytes>store.maxBytes)throw failure(413,`输入文件总大小不能超过 ${Math.ceil(store.maxBytes/1048576)} MiB`);return file;};
+  const inputFile=part=>{const file=inlineFile(part,store);totalBytes+=file.bytes.length;if(totalBytes>=store.maxBytes)throw failure(413,`输入文件总大小必须小于 ${Math.ceil(store.maxBytes/1048576)} MiB`);return file;};
   const convert=async content=>{
     if(!Array.isArray(content))return content;
     return Promise.all(content.map(async part=>{

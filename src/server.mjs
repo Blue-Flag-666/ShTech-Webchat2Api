@@ -3,7 +3,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { fetchModelList, upstreamFetch } from './transport.mjs';
 import { modelDirectory } from './models.mjs';
 import { TokenManager, secret } from './auth.mjs';
-import { toolPolicy, toolPrompt, normalizeMessages, parseToolCalls } from './tools.mjs';
+import { toolPolicy, toolPrompt, normalizeMessages, parseToolCalls, createToolCallStream } from './tools.mjs';
 import { normalizeRequest, ProtocolOutput } from './protocols.mjs';
 import { shutdown } from './lifecycle.mjs';
 import { outputPolicy, outputPrompt, parseStructured } from './structured.mjs';
@@ -612,6 +612,9 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         await write(res,frame);
       },media.input,{fileSearchItem:fileSearch?.item}) : null;
       const policy = toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls,input.max_tool_calls);
+      const makeCallId=()=>`call_${randomUUID().replaceAll('-','')}`;
+      const toolStream=input.stream&&policy?createToolCallStream(policy,makeCallId):null;
+      let streamedToolCalls=0;
       const catalogue = await models();
       if (!catalogue.length) throw error(503, '模型目录没有已确认的自部署国内模型');
       const selected=catalogue.find(model=>model.id===(input.model??'qwen-instruct'));
@@ -690,6 +693,19 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         if (responseBytes > 8 * 1024 * 1024) throw error(502, '上游响应超过 8 MiB');
         if (!input.stream || policy || formatPolicy) text += content;
         if (!input.stream || policy || formatPolicy) reasoning += thought;
+        if(toolStream&&content&&!nativeCalls.size) {
+          const calls=toolStream.push(content);
+          if(calls.length) {
+            if(adapter)for(const call of calls)await adapter.toolCall(call);
+            else if(!legacy) {
+              if(!res.headersSent)res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
+              const delta={role:'assistant',tool_calls:calls.map((call,offset)=>({...call,index:streamedToolCalls+offset}))};
+              const frame={id:chunk.id||`chatcmpl-${randomUUID()}`,object:'chat.completion.chunk',created:chunk.created||Math.floor(Date.now()/1000),model:input.model||chunk.model||'qwen-instruct',choices:[{index:0,delta,finish_reason:null}],...(input.stream_options?.include_usage?{usage:null}:{})};
+              await write(res,`data: ${JSON.stringify(frame)}\n\n`);
+            }
+            streamedToolCalls+=calls.length;
+          }
+        }
         if (choice?.finish_reason != null) finished = true;
         last = { ...last, ...chunk, choices: choice ? chunk.choices : last?.choices };
         if (input.stream && !policy && !formatPolicy) {
@@ -706,7 +722,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       if (!seen || !finished) throw error(502, '上游流意外结束，未收到完成标记');
       const bufferedText=adapter && input.stream && !policy && !formatPolicy ? adapter.text : text;
       const nativePayload=nativeCalls.size?JSON.stringify({tool_calls:[...nativeCalls].sort((a,b)=>a[0]-b[0]).map(([,call])=>({id:call.id||undefined,name:call.name,arguments:call.arguments}))}):null;
-      const parsed = parseToolCalls(nativePayload??bufferedText,policy,()=>`call_${randomUUID().replaceAll('-','')}`);
+      const parsed = nativePayload?parseToolCalls(nativePayload,policy,makeCallId):toolStream?toolStream.finish():parseToolCalls(bufferedText,policy,makeCallId);
       if(nativePayload&&bufferedText.trim())parsed.content=bufferedText.trim();
       if(input.parallel_tool_calls===false&&parsed.tool_calls.length>1)throw error(502,'模型返回了多个工具调用，但 parallel_tool_calls=false');
       if(!parsed.tool_calls.length) parsed.content=parseStructured(parsed.content,formatPolicy);
@@ -730,8 +746,9 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         return;
       }
       if (input.stream && (policy || formatPolicy)) {
-        res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
-        const delta = { role:'assistant', ...(parsed.content ? {content:parsed.content}:{}), ...(reasoning?{reasoning_content:reasoning}:{}), ...(parsed.tool_calls.length?{tool_calls:parsed.tool_calls.map((t,index)=>({...t,index}))}:{}) };
+        if(!res.headersSent)res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
+        const remainingCalls=parsed.tool_calls.slice(streamedToolCalls);
+        const delta = { role:'assistant', ...(parsed.content ? {content:parsed.content}:{}), ...(reasoning?{reasoning_content:reasoning}:{}), ...(remainingCalls.length?{tool_calls:remainingCalls.map((t,index)=>({...t,index:index+streamedToolCalls}))}:{}) };
         const streamBase=input.stream_options?.include_usage?{...last,usage:null}:last;
         await write(res,`data: ${JSON.stringify({...streamBase,choices:[{index:0,delta,finish_reason:null}]})}\n\n`);
         await write(res,`data: ${JSON.stringify({...streamBase,choices:[{index:0,delta:{},finish_reason:finish}]})}\n\n`);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeMessages, parseToolCalls, toolPolicy } from '../src/tools.mjs';
+import { createToolCallStream, normalizeMessages, parseToolCalls, toolPolicy } from '../src/tools.mjs';
 const tools=[{type:'function',function:{name:'weather',parameters:{type:'object',properties:{city:{type:'string'}},required:['city'],additionalProperties:false}}}];
 test('工具调用解析保留标识与 JSON 参数',()=>{
   const policy=toolPolicy(tools,'required');
@@ -8,11 +8,28 @@ test('工具调用解析保留标识与 JSON 参数',()=>{
   assert.equal(result.content,null);assert.equal(result.tool_calls[0].id,'call_test');
   assert.deepEqual(JSON.parse(result.tool_calls[0].function.arguments),{city:'上海'});
 });
+test('流式工具解析器跨分片后立即返回完整调用',()=>{
+  let next=0;const stream=createToolCallStream(toolPolicy(tools,'required'),()=>`call_${++next}`);
+  assert.deepEqual(stream.push('<api_tool_'),[]);
+  assert.deepEqual(stream.push('call>{"name":"weather","arguments":{"city":"上海"}}'),[]);
+  const calls=stream.push('</api_tool_call>等待上游结束');
+  assert.equal(calls.length,1);assert.equal(calls[0].id,'call_1');
+  assert.deepEqual(JSON.parse(calls[0].function.arguments),{city:'上海'});
+  const result=stream.finish();assert.equal(result.content,'等待上游结束');assert.deepEqual(result.tool_calls,calls);
+});
 test('工具调用兼容纯 JSON、代码围栏和 OpenAI function 结构',()=>{
   const policy=toolPolicy(tools,'required');
   for(const value of ['{"name":"weather","arguments":{"city":"上海"}}','```json\n{"function":{"name":"weather","arguments":"{\\"city\\":\\"上海\\"}"}}\n```']){
     const result=parseToolCalls(value,policy,()=> 'call_json');assert.equal(result.content,null);assert.equal(result.tool_calls[0].function.name,'weather');
   }
+});
+test('标签内兼容 tool_calls 包装、无参数工具和 custom 顶层 input',()=>{
+  const wrapped=parseToolCalls('<tool_call>{"tool_calls":[{"name":"weather","arguments":{"city":"上海"}}]}</tool_call>',toolPolicy(tools,'required'),()=> 'call_wrapped');
+  assert.equal(wrapped.tool_calls[0].function.name,'weather');
+  const noArgs=[{type:'function',function:{name:'ping',parameters:{type:'object',additionalProperties:false}}}];
+  assert.deepEqual(JSON.parse(parseToolCalls('<tool_call>{"name":"ping"}</tool_call>',toolPolicy(noArgs,'required'),()=> 'call_ping').tool_calls[0].function.arguments),{});
+  const custom=toolPolicy([{type:'function',custom:true,function:{name:'patch',parameters:{type:'object'}}}],'required');
+  assert.deepEqual(JSON.parse(parseToolCalls('<tool_call>{"name":"patch","input":"diff"}</tool_call>',custom,()=> 'call_patch').tool_calls[0].function.arguments),{input:'diff'});
 });
 test('工具调用兼容围栏前说明和单块多调用',()=>{
   const policy=toolPolicy(tools,'required');

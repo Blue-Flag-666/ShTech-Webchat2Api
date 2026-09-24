@@ -12,6 +12,14 @@ test('Files 存储支持创建、分页、读取和删除',()=>{
   store.delete(first.id);assert.throws(()=>store.get(first.id),/不存在/);
 });
 
+test('Files 与内联文件严格小于配置的大小上限',async()=>{
+  const store=new FileStore(4,3600000,10);
+  assert.equal(store.create({filename:'nine.txt',mime:'text/plain',bytes:Buffer.alloc(9)}).bytes,9);
+  assert.throws(()=>store.create({filename:'ten.txt',mime:'text/plain',bytes:Buffer.alloc(10)}),/必须小于/);
+  const inline=`data:text/plain;base64,${Buffer.alloc(10).toString('base64')}`;
+  await assert.rejects(()=>expandInputFiles('/v1/responses',{input:[{role:'user',content:[{type:'input_file',filename:'ten.txt',file_data:inline}]}]},store),/必须小于/);
+});
+
 test('multipart 文件上传解析 OpenAI SDK 使用的字段',()=>{
   const boundary='test-boundary';
   const body=Buffer.from([
@@ -39,7 +47,7 @@ test('Responses input_file 与工具文件结果转换为带文件名的文本�
   assert.match(value.input[2].content[0].image_url,/^data:image\/png;base64,/);
 });
 
-test('单请求多个输入文件合计不能超过网页上限',async()=>{
-  const store=new FileStore(4,3600000,10),first=store.create({filename:'a.txt',mime:'text/plain',bytes:Buffer.from('123456')}),second=store.create({filename:'b.txt',mime:'text/plain',bytes:Buffer.from('abcdef')});
+test('单请求多个输入文件合计必须严格小于网页上限',async()=>{
+  const store=new FileStore(4,3600000,10),first=store.create({filename:'a.txt',mime:'text/plain',bytes:Buffer.from('123456')}),second=store.create({filename:'b.txt',mime:'text/plain',bytes:Buffer.from('abcd')});
   await assert.rejects(()=>expandInputFiles('/v1/responses',{input:[{role:'user',content:[{type:'input_file',file_id:first.id},{type:'input_file',file_id:second.id}]}]},store),/总大小/);
 });

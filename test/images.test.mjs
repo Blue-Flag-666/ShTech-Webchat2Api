@@ -57,3 +57,8 @@ test('拒绝视频、非用户图片和不支持格式',async()=>{
   assert.throws(()=>extractImages('/v1/responses',{input:[{role:'user',content:[{type:'input_video',video_url:'x'}]}]}),/内容块/);
   await assert.rejects(()=>prepareImages(['data:image/svg+xml;base64,YQ=='],{uploadToken:'x'},'x',AbortSignal.timeout(1000)),/不支持/);
 });
+
+test('图片必须严格小于 10 MiB',async()=>{
+  const exact=Buffer.alloc(10*1024*1024);Buffer.from([137,80,78,71,13,10,26,10]).copy(exact);
+  await assert.rejects(()=>prepareImages([`data:image/png;base64,${exact.toString('base64')}`],{uploadToken:'x'},'x',AbortSignal.timeout(1000)),/小于 10 MiB/);
+});

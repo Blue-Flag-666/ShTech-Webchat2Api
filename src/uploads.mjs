@@ -32,7 +32,7 @@ export class UploadStore{
     if(!this.maximum)throw failure(400,'Uploads 已禁用');
     if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(key=>!['bytes','filename','mime_type','purpose','expires_after'].includes(key)))throw failure(400,'Upload 请求无效');
     if(!Number.isInteger(body.bytes)||body.bytes<1)throw failure(400,'bytes 必须为正整数');
-    if(body.bytes>this.fileStore.maxBytes)throw failure(413,`Upload 不能超过 ${Math.ceil(this.fileStore.maxBytes/1048576)} MiB`);
+    if(body.bytes>=this.fileStore.maxBytes)throw failure(413,`Upload 必须小于 ${Math.ceil(this.fileStore.maxBytes/1048576)} MiB`);
     if(typeof body.mime_type!=='string'||!body.mime_type.trim()||body.mime_type.length>255)throw failure(400,'mime_type 无效');
     if(!PURPOSES.has(body.purpose))throw failure(400,'purpose 无效');
     const now=Date.now(),id=`upload_${randomUUID().replaceAll('-','')}`,value={id,object:'upload',bytes:body.bytes,created_at:Math.floor(now/1000),expires_at:Math.floor((now+this.ttl)/1000),filename:filename(body.filename),purpose:body.purpose,status:'pending'};

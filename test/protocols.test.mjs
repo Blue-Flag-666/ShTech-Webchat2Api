@@ -125,6 +125,10 @@ test('Responses allowed_tools 只向上游暴露允许的工具',()=>{
   assert.equal(normalized.tool_choice,'required');assert.equal(normalized.tools.length,1);assert.equal(normalized.tools[0].function.name,'patch');assert.equal(normalized.tools[0].custom,true);
   assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'a'}],tool_choice:{type:'allowed_tools',mode:'auto',tools:[{type:'function',name:'missing'}]}}),/未知/);
 });
+test('Responses function tool 保留 strict 参数校验语义',()=>{
+  const value=normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'lookup',strict:false,parameters:{type:'object',required:['query']}}]});
+  assert.equal(value.tools[0].function.strict,false);
+});
 test('截断流不会产生协议成功结束事件，长度截断标记 incomplete',async()=>{
   await fixture(async call=>{
     for(const [path,body] of requests){
@@ -261,6 +265,29 @@ test('两个协议在上游结束前发送首个文本增量',async()=>{
       upstreamController.enqueue(frame('','stop'));upstreamController.close();
       while(!(await iterator.next()).done) {}
     }finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
+  }
+});
+
+test('三个协议在上游结束前发送完整工具调用',async()=>{
+  const cases=[
+    ['/v1/chat/completions',{model:'qwen-instruct',messages:[{role:'user',content:'天气'}],tools:[{type:'function',function:{name:'weather',parameters:{type:'object'}}}],tool_choice:'required'},value=>value.choices?.[0]?.delta?.tool_calls?.[0]],
+    ['/v1/responses',{model:'qwen-instruct',input:'天气',tools:[{type:'function',name:'weather',parameters:{type:'object'}}],tool_choice:'required'},value=>value.type==='response.output_item.done'&&value.item?.type==='function_call'?value.item:null],
+    ['/v1/messages',{model:'qwen-instruct',messages:[{role:'user',content:'天气'}],max_tokens:64,tools:[{name:'weather',input_schema:{type:'object'}}],tool_choice:{type:'any'}},value=>value.type==='content_block_start'&&value.content_block?.type==='tool_use'?value.content_block:null]
+  ];
+  const encoder=new TextEncoder(),frame=(content,finish_reason=null)=>encoder.encode(`data: ${JSON.stringify({choices:[{index:0,delta:{content},finish_reason}]})}\n\n`);
+  for(const [path,body,select] of cases) {
+    let upstreamController;
+    const server=createServer({key:'test',token:'token',group:'g',timeout:2000},async()=>new Response(new ReadableStream({start(controller){upstreamController=controller;controller.enqueue(frame('<api_tool_'));controller.enqueue(frame('call>{"name":"weather","arguments":{"city":"上海"}}</api_tool_call>'));}}),{headers:{'content-type':'text/event-stream'}}),confirmedModels);
+    await listenForFetch(server);
+    try {
+      const headers={'content-type':'application/json',...(path==='/v1/messages'?{'x-api-key':'test'}:{authorization:'Bearer test'})};
+      const response=await fetch(`http://127.0.0.1:${server.address().port}${path}`,{method:'POST',headers,body:JSON.stringify({...body,stream:true}),signal:AbortSignal.timeout(2000)});
+      const iterator=events(response.body)[Symbol.asyncIterator]();let call;
+      while(!call){const next=await iterator.next();assert.equal(next.done,false);call=select(JSON.parse(next.value.data));}
+      assert.equal(call.name||call.function?.name,'weather');
+      upstreamController.enqueue(frame('','stop'));upstreamController.close();
+      while(!(await iterator.next()).done) {}
+    }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
   }
 });
 

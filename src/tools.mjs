@@ -50,33 +50,36 @@ function parseModelJson(value) {
   }
   return JSON.parse(repaired);
 }
+function addToolCall(parsed,policy,makeId,calls) {
+  const value=parsed?.function?{id:parsed.id,name:parsed.function.name,arguments:parsed.function.arguments}:parsed;
+  if (!policy.allowed.has(value?.name)) return false;
+  let args=value.arguments;
+  if(args===undefined)args=policy.custom?.has(value.name)&&typeof value.input==='string'?{input:value.input}:{};
+  if(typeof args==='string'){try{args=parseModelJson(args);}catch{throw upstreamError('模型输出了无法解析的工具参数');}}
+  if(!args||typeof args!=='object'||Array.isArray(args))throw upstreamError('模型输出了无效工具参数');
+  if(policy.custom?.has(value.name)&&typeof args.input!=='string')throw upstreamError('模型输出了无效的 custom 工具文本参数');
+  const declaration=policy.tools.find(tool=>tool.function.name===value.name);
+  if(declaration?.function?.parameters&&declaration.function.strict!==false)try{validateSchemaValue(args,declaration.function.parameters);}catch{throw upstreamError(`模型输出的工具参数不符合 ${value.name} 的 JSON Schema`);}
+  const suppliedId=typeof value.id==='string'&&value.id;
+  let callId=suppliedId?value.id:makeId();
+  if(calls.some(call=>call.id===callId)){
+    if(suppliedId)throw upstreamError('模型输出了重复的工具调用 ID');
+    const base=callId;let suffix=calls.length;
+    do{callId=`${base}_${suffix++}`;}while(calls.some(call=>call.id===callId));
+  }
+  calls.push({id:callId,type:'function',function:{name:value.name,arguments:JSON.stringify(args)}});
+  if(calls.length>policy.maxCalls)throw upstreamError(`模型工具调用数量超过 max_tool_calls=${policy.maxCalls}`);
+  return true;
+}
+const toolValues=parsed=>Array.isArray(parsed)?parsed:Array.isArray(parsed?.tool_calls)?parsed.tool_calls:[parsed];
 export function parseToolCalls(text, policy, makeId) {
   if (!policy) return { content: text, tool_calls: [] };
   const calls = [];
-  const add=parsed=>{
-    const value=parsed?.function?{name:parsed.function.name,arguments:parsed.function.arguments}:parsed;
-    if (!policy.allowed.has(value?.name)) return false;
-    let args=value.arguments;
-    if(typeof args==='string'){try{args=parseModelJson(args);}catch{throw upstreamError('模型输出了无法解析的工具参数');}}
-    if(!args||typeof args!=='object'||Array.isArray(args))throw upstreamError('模型输出了无效工具参数');
-    if(policy.custom?.has(value.name)&&typeof args.input!=='string')throw upstreamError('模型输出了无效的 custom 工具文本参数');
-    const declaration=policy.tools.find(tool=>tool.function.name===value.name);
-    if(declaration?.function?.parameters&&declaration.function.strict!==false)try{validateSchemaValue(args,declaration.function.parameters);}catch{throw upstreamError(`模型输出的工具参数不符合 ${value.name} 的 JSON Schema`);}
-    const suppliedId=typeof value.id==='string'&&value.id;
-    let callId=suppliedId?value.id:makeId();
-    if(calls.some(call=>call.id===callId)){
-      if(suppliedId)throw upstreamError('模型输出了重复的工具调用 ID');
-      const base=callId;let suffix=calls.length;
-      do{callId=`${base}_${suffix++}`;}while(calls.some(call=>call.id===callId));
-    }
-    calls.push({id:callId,type:'function',function:{name:value.name,arguments:JSON.stringify(args)}});
-    if(calls.length>policy.maxCalls)throw upstreamError(`模型工具调用数量超过 max_tool_calls=${policy.maxCalls}`);
-    return true;
-  };
+  const add=parsed=>addToolCall(parsed,policy,makeId,calls);
   const content = text.replace(/<\s*(api_tool_call|tool_call)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi, (_,tag,raw)=>{
     let parsed;
     try { parsed=parseModelJson(raw); } catch { throw upstreamError('模型输出了无法解析的工具调用'); }
-    const values=Array.isArray(parsed)?parsed:[parsed];
+    const values=toolValues(parsed);
     if(!values.length||values.some(value=>!add(value)))throw upstreamError('模型输出了不允许的工具');
     return '';
   }).trim();
@@ -87,12 +90,49 @@ export function parseToolCalls(text, policy, makeId) {
     const candidates=[content,content.replace(/^```(?:json)?\s*|\s*```$/gi,''),...fenced];
     for(const candidate of candidates){
       let parsed;try{parsed=parseModelJson(candidate);}catch{continue;}
-      const values=Array.isArray(parsed)?parsed:Array.isArray(parsed?.tool_calls)?parsed.tool_calls:[parsed];
+      const values=toolValues(parsed);
       if(values.length&&values.every(value=>policy.allowed.has(value?.name||value?.function?.name))){for(const value of values)add(value);remaining='';break;}
     }
   }
   if (policy.required && !calls.length) throw upstreamError('模型未遵循 required 工具调用约束');
   return { content: remaining || null, tool_calls: calls };
+}
+export function createToolCallStream(policy,makeId) {
+  let source='',scanFrom=0,pending=null;
+  const calls=[];
+  const pattern=()=>/<\s*(api_tool_call|tool_call)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi;
+  return {
+    push(value) {
+      if(!value)return [];
+      source+=value;
+      const added=[];
+      while(true) {
+        if(!pending) {
+          const opening=/<\s*(api_tool_call|tool_call)\s*>/gi;opening.lastIndex=scanFrom;
+          const match=opening.exec(source);
+          if(!match){scanFrom=Math.max(scanFrom,source.length-32);break;}
+          pending={tag:match[1].toLowerCase(),bodyStart:opening.lastIndex};
+        }
+        const closing=/<\s*\/\s*(api_tool_call|tool_call)\s*>/gi;closing.lastIndex=pending.bodyStart;
+        let close;
+        while((close=closing.exec(source))&&close[1].toLowerCase()!==pending.tag){}
+        if(!close)break;
+        let parsed;try{parsed=parseModelJson(source.slice(pending.bodyStart,close.index));}catch{throw upstreamError('模型输出了无法解析的工具调用');}
+        const values=toolValues(parsed),before=calls.length;
+        if(!values.length||values.some(item=>!addToolCall(item,policy,makeId,calls)))throw upstreamError('模型输出了不允许的工具');
+        added.push(...calls.slice(before));
+        scanFrom=closing.lastIndex;pending=null;
+      }
+      return added;
+    },
+    finish() {
+      if(!calls.length)return parseToolCalls(source,policy,makeId);
+      const content=source.replace(pattern(),'').trim();
+      if (/<\s*\/?\s*(?:api_tool_call|tool_call)\b/i.test(content)) throw upstreamError('工具调用块未完整结束');
+      if(policy.required&&!calls.length)throw upstreamError('模型未遵循 required 工具调用约束');
+      return {content:content||null,tool_calls:calls};
+    }
+  };
 }
 export function normalizeMessages(messages, policy) {
   if (!Array.isArray(messages) || !messages.length) throw invalid('messages 必须是非空数组');

@@ -156,9 +156,9 @@ async function remote(urlValue,signal,redirects=0) {
       if(response.statusCode!==200){response.resume();reject(invalid(`图片下载 HTTP ${response.statusCode}`));return;}
       const mime=(response.headers['content-type']||'').split(';')[0].toLowerCase();
       if(!types.has(mime)){response.resume();reject(invalid('图片格式仅支持 JPEG、PNG、BMP、GIF 和 WebP'));return;}
-      if(Number(response.headers['content-length'])>MAX_BYTES){response.resume();reject(invalid('单张图片不能超过 10 MB'));return;}
+      if(Number(response.headers['content-length'])>=MAX_BYTES){response.resume();reject(invalid('单张图片必须小于 10 MiB'));return;}
       let size=0;const chunks=[];
-      response.on('data',chunk=>{size+=chunk.length;if(size>MAX_BYTES)response.destroy(invalid('单张图片不能超过 10 MB'));else chunks.push(chunk);});
+      response.on('data',chunk=>{size+=chunk.length;if(size>=MAX_BYTES)response.destroy(invalid('单张图片必须小于 10 MiB'));else chunks.push(chunk);});
       response.on('end',()=>resolve({bytes:Buffer.concat(chunks),mime,name:`image${types.get(mime)}`}));
       response.on('error',reject);
     });
@@ -177,7 +177,7 @@ function data(value) {
   const match=/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)$/i.exec(value);
   if(!match||!types.has(match[1].toLowerCase()))throw invalid('无效或不支持的图片 data URL');
   const bytes=Buffer.from(match[2].replace(/\s/g,''),'base64');
-  if(!bytes.length||bytes.length>MAX_BYTES)throw invalid('单张图片必须介于 1 字节和 10 MB 之间');
+  if(!bytes.length||bytes.length>=MAX_BYTES)throw invalid('单张图片必须介于 1 字节和小于 10 MiB 之间');
   const mime=match[1].toLowerCase();if(!validBytes(bytes,mime))throw invalid('图片内容与声明格式不符');return{bytes,mime,name:`image${types.get(mime)}`};
 }
 async function upload(file,uploadToken,accessToken,signal,fetcher) {

@@ -28,7 +28,7 @@ function responseTools(tools) {
     }
     if (!['function','custom'].includes(tool.type)) throw bad('当前仅支持 function、custom 和 namespace 工具');
     if (tool.type==='function') {
-      result.push({type:'function',function:{name:tool.name,description:tool.description,parameters:tool.parameters}});
+      result.push({type:'function',function:{name:tool.name,description:tool.description,parameters:tool.parameters,strict:tool.strict}});
       return;
     }
     if (tool.format!==undefined && (!tool.format || typeof tool.format!=='object' || Array.isArray(tool.format))) throw bad('custom tool format 必须是对象');
@@ -284,6 +284,7 @@ export class ProtocolOutput {
     this.reasoningEncryptedContent=`enc_${randomUUID().replaceAll('-','')}`;
     this.text=''; this.reasoning=''; this.started=false; this.textIndex=null; this.reasoningIndex=null; this.nextIndex=0;
     this.fileSearchItem=context.fileSearchItem||null;this.fileSearchIndex=null;
+    this.callIndexes=new Map();this.callItems=new Map();
     this.metadata=original.metadata || {};this.original=original;this.customTools=new Set();
     const collect=tools=>{for(const tool of tools || [])if(tool?.type==='namespace')collect(tool.tools);else if(tool?.type==='custom'&&typeof tool.name==='string')this.customTools.add(tool.name);};
     collect(original.tools);
@@ -350,6 +351,29 @@ export class ProtocolOutput {
     if(response) await this.event('response.reasoning_summary_text.delta',{item_id:this.reasoningId,output_index:this.reasoningIndex,summary_index:0,delta:value});
     else await this.event('content_block_delta',{index:this.reasoningIndex,delta:{type:'thinking_delta',thinking:value}});
   }
+  callItem(call) {
+    if(this.path==='/v1/responses')return this.customTools.has(call.function.name)
+      ? {id:id('ctc'),type:'custom_tool_call',status:'completed',call_id:call.id,name:call.function.name,input:(()=>{const value=JSON.parse(call.function.arguments).input;return typeof value==='string'?value:JSON.stringify(value);})()}
+      : {id:id('fc'),type:'function_call',status:'completed',call_id:call.id,name:call.function.name,arguments:call.function.arguments};
+    return {type:'tool_use',id:call.id,name:call.function.name,input:JSON.parse(call.function.arguments)};
+  }
+  async toolCall(call) {
+    if(this.callIndexes.has(call.id))return;
+    await this.start();
+    const response=this.path==='/v1/responses',item=this.callItem(call),index=this.nextIndex++;
+    this.callIndexes.set(call.id,index);this.callItems.set(call.id,item);
+    if(response) {
+      const custom=item.type==='custom_tool_call',field=custom?'input':'arguments';
+      await this.event('response.output_item.added',{output_index:index,item:{...item,status:'in_progress',[field]:''}});
+      await this.event(custom?'response.custom_tool_call_input.delta':'response.function_call_arguments.delta',{item_id:item.id,output_index:index,delta:item[field]});
+      await this.event(custom?'response.custom_tool_call_input.done':'response.function_call_arguments.done',{item_id:item.id,output_index:index,[field]:item[field]});
+      await this.event('response.output_item.done',{output_index:index,item});
+    } else {
+      await this.event('content_block_start',{index,content_block:{...item,input:{}}});
+      await this.event('content_block_delta',{index,delta:{type:'input_json_delta',partial_json:JSON.stringify(item.input)}});
+      await this.event('content_block_stop',{index});
+    }
+  }
   async finish(completion, stream) {
     const message=completion.choices[0].message, calls=message.tool_calls || [];
     const usage=tokenUsage(completion,this.input), limited=completion.choices[0].finish_reason === 'length';
@@ -357,11 +381,7 @@ export class ProtocolOutput {
     if(message.reasoning_content && !this.reasoning) this.reasoning=message.reasoning_content;
     const reasoningItem=response ? this.reasoningItem(limited?'incomplete':'completed') : {type:'thinking',thinking:this.reasoning,signature:''};
     const messageItem=response ? this.item(message.content,limited?'incomplete':'completed') : {type:'text',text:message.content};
-    const callItems=calls.map(call=>response
-      ? this.customTools.has(call.function.name)
-        ? {id:id('ctc'),type:'custom_tool_call',status:'completed',call_id:call.id,name:call.function.name,input:(()=>{const value=JSON.parse(call.function.arguments).input;return typeof value==='string'?value:JSON.stringify(value);})()}
-        : {id:id('fc'),type:'function_call',status:'completed',call_id:call.id,name:call.function.name,arguments:call.function.arguments}
-      : {type:'tool_use',id:call.id,name:call.function.name,input:JSON.parse(call.function.arguments)});
+    const callItems=calls.map(call=>this.callItems.get(call.id)||this.callItem(call));
     let output=[];
     if(!stream) output=[...(this.fileSearchItem?[this.fileSearchItem]:[]),...(this.reasoning?[reasoningItem]:[]),...(message.content?[messageItem]:[]),...callItems];
     const result=response ? this.response(output,limited?'incomplete':'completed',usage)
@@ -389,8 +409,9 @@ export class ProtocolOutput {
         await this.event('response.output_item.done',{output_index:this.textIndex,item:messageItem});
       } else await this.event('content_block_stop',{index:this.textIndex});
     }
-    for (const item of callItems) {
-      const index=this.nextIndex++;indexed.push([index,item]);
+    for (let callIndex=0;callIndex<callItems.length;callIndex++) {
+      const item=callItems[callIndex],call=calls[callIndex],existing=this.callIndexes.get(call.id),index=existing??this.nextIndex++;indexed.push([index,item]);
+      if(existing!==undefined)continue;
       if (response) {
         const custom=item.type==='custom_tool_call',field=custom?'input':'arguments';
         await this.event('response.output_item.added',{output_index:index,item:{...item,status:'in_progress',[field]:''}});
