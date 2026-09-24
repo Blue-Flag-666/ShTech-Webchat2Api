@@ -112,7 +112,7 @@ jobs:
           archive: false
   publish:
     needs: image-test
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
       packages: write
