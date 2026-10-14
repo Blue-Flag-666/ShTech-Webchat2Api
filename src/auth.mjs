@@ -16,6 +16,11 @@ export function secret(env, name) {
   if (env[`${name}_FILE`]) return readFileSync(env[`${name}_FILE`], 'utf8').trimEnd();
   return env[name] || '';
 }
+// A delayed 401 may belong to a token another request has already replaced.
+// Reuse that replacement instead of logging in again and invalidating peers.
+export function refreshRejectedToken(manager, rejectedToken, signal) {
+  return manager.get(!(manager.token && manager.token !== rejectedToken), signal);
+}
 export function encryptPassword(password, salt) {
   const key = Buffer.from(salt);
   if (![16, 24, 32].includes(key.length)) throw fail('CAS 密码加密参数无效');

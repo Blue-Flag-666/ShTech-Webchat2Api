@@ -2,7 +2,7 @@ import http from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { fetchModelList, upstreamFetch } from './transport.mjs';
 import { modelDirectory, modelBudget, isKimiK3Model } from './models.mjs';
-import { TokenManager, secret } from './auth.mjs';
+import { TokenManager, secret, refreshRejectedToken } from './auth.mjs';
 import { toolPolicy, toolPrompt, normalizeMessages, parseToolCalls, createToolCallStream } from './tools.mjs';
 import { normalizeRequest, ProtocolOutput } from './protocols.mjs';
 import { shutdown } from './lifecycle.mjs';
@@ -22,6 +22,7 @@ import { Metrics } from './metrics.mjs';
 import { IdempotencyStore } from './idempotency.mjs';
 import { RequestLogger } from './request-log.mjs';
 import { normalizeUpstreamEvent, protocolFailure } from './upstream-sse.mjs';
+import { upstreamBusinessFailure } from './upstream-errors.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
 const GROUP_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-';
@@ -285,6 +286,7 @@ const retryableNetworkCodes=new Set(['ECONNRESET','ECONNREFUSED','ECONNABORTED',
 const retryableNetworkError=cause=>retryableNetworkCodes.has(cause?.code??cause?.cause?.code);
 async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, onDispatch) {
   let renewed=false,attempt=0;
+  const model=JSON.parse(options.body).aiType;
   while(true) {
     let response;
     try{onDispatch?.();response=await fetcher(UPSTREAM,options);}catch(cause){
@@ -294,7 +296,7 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
     }
     if(response.status===401 && !renewed && tokenManager.renewable) {
       await response.body?.cancel();
-      options.headers['x-access-token']=await tokenManager.get(true,options.signal);renewed=true;continue;
+      options.headers['x-access-token']=await refreshRejectedToken(tokenManager,options.headers['x-access-token'],options.signal);renewed=true;continue;
     }
     const serverDelay=parseRetryAfter(response.headers.get('retry-after'));
     if([429,502,503,504].includes(response.status)&&attempt<retries){
@@ -311,7 +313,7 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
     if(!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
       await response.body?.cancel();throw error(502,'上游没有返回 SSE，可能登录已失效');
     }
-    let emitted=false,retry=false,seenChoice=false,finished=false,pending=[],pendingBytes=0,ignored=0;
+    let emitted=false,retry=false,retryFailure,seenChoice=false,finished=false,pending=[],pendingBytes=0,ignored=0;
     try{
       for await(const rawItem of events(response.body)) {
         if(rawItem.event==='error')throw error(502,'上游返回错误事件');
@@ -323,14 +325,13 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
         }
         if(item.event==='error')throw error(502,'上游返回错误事件');
         let value;try{value=JSON.parse(item.data);}catch{throw error(502,'上游 SSE 包含无效 JSON');}
-        if(value?.error)throw error(502,'上游返回错误');
-        const message=typeof value?.message==='string'?value.message:typeof value?.msg==='string'?value.msg:'';
-        const expired=Number(value?.code)===401 || value?.success===false && /token.*(?:失效|过期|expired|invalid)|请重新登录|登录已过期/i.test(message);
-        if(expired) {
-          if(!emitted && !renewed && tokenManager.renewable){retry=true;break;}
-          throw error(401,'上游登录已失效');
+        if(value?.error||value?.success===false||Number(value?.code)>=400){
+          const failure=upstreamBusinessFailure(value,model);
+          console.warn(`[上游业务] ${failure.message}`);
+          if(failure.status===401&&!emitted&&!renewed&&tokenManager.renewable){retry=true;break;}
+          if(!emitted&&[502,503,504].includes(failure.status)&&attempt<retries){retryFailure=failure;break;}
+          throw failure;
         }
-        if(value?.success===false||Number(value?.code)>=400)throw error([401,403,429,503,504].includes(Number(value.code))?Number(value.code):502,'上游返回业务错误');
         if(!Array.isArray(value?.choices)&&value?.other===undefined&&value?.usage===undefined)throw protocolFailure('未知上游 SSE 格式');
         if(Array.isArray(value?.choices)&&value.choices.length){
           seenChoice=true;
@@ -354,6 +355,7 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
       await delay(upstreamBackoff(502,attempt++),options.signal);
       continue;
     }
+    if(retryFailure){await delay(upstreamBackoff(retryFailure.status,attempt++),options.signal);continue;}
     if(!retry&&!emitted&&attempt<retries){
       await delay(upstreamBackoff(502,attempt++),options.signal);
       continue;
@@ -363,7 +365,7 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
     if(!retry&&!finished)throw error(502,'上游流意外结束，未收到完成标记');
     if(!retry)return;
     // No output was exposed; the rejected stream has been closed before retry.
-    options.headers['x-access-token']=await tokenManager.get(true,options.signal);renewed=true;
+    options.headers['x-access-token']=await refreshRejectedToken(tokenManager,options.headers['x-access-token'],options.signal);renewed=true;
   }
 }
 export async function* guardedEvents(source,circuit,model,signal) {
@@ -522,7 +524,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     try{return await read();}
     catch(cause){
       if(cause?.status!==401||!tokenManager.renewable)throw cause;
-      token=await timedUpstream(signal=>tokenManager.get(true,signal),Math.min(config.timeout??120000,35000));
+      token=await timedUpstream(signal=>refreshRejectedToken(tokenManager,token,signal),Math.min(config.timeout??120000,35000));
       return read();
     }
   }

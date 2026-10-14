@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loginCas, TokenManager, encryptPassword } from '../src/auth.mjs';
+import { loginCas, TokenManager, encryptPassword, refreshRejectedToken } from '../src/auth.mjs';
 import { createDecipheriv } from 'node:crypto';
 
 test('CAS 加密前缀和 IV 保持 ASCII，解密后密码字符边界不变',()=>{
@@ -105,4 +105,15 @@ test('CAS 空 token 记录失败，日志回调故障不影响认证',async()=>{
   assert.deepEqual(messages.map(item=>item.event),['start','failure']);
   assert.match(messages.at(-1).message,/空 token/);
   assert.equal(await new TokenManager({username:'u',password:'p'},async()=>'token',()=>{throw new Error('logger failed');}).get(),'token');
+});
+
+test('另一个请求已更换 token 时，迟到的 401 不再次登录',async()=>{
+  let logins=0;
+  const manager=new TokenManager({token:'old',username:'u',password:'p'},async()=>`new-${++logins}`,()=>{});
+  assert.equal(await refreshRejectedToken(manager,'old'),'new-1');
+  assert.equal(await refreshRejectedToken(manager,'old'),'new-1');
+  assert.equal(await refreshRejectedToken(manager,'old'),'new-1');
+  assert.equal(logins,1);
+  assert.equal(await refreshRejectedToken(manager,'new-1'),'new-2');
+  assert.equal(logins,2);
 });

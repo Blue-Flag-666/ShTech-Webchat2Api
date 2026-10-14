@@ -344,6 +344,63 @@ async function withServer(fetcher, fn, overrides = {}) {
   const call = (body = request, key = config.key) => fetch(`${base}/v1/chat/completions`, {method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
   try { await fn(call, base); } finally { server.closeAllConnections(); await new Promise(r => server.close(r)); }
 }
+
+test('反复切换四种模型默认会话互不复用，请求参数错误不会封锁模型',async()=>{
+  const records=['chatglm','qwen-instruct','deepseek-pro','Kimi-k3'].map(aiType=>({aiType,rootAiType:'xinference',maxToken:524288}));
+  const groups=new Set(),routes=[];let glmCalls=0;
+  await withServer(async(_url,options)=>{
+    const body=JSON.parse(options.body);routes.push(body.aiType);
+    assert.ok(!groups.has(body.chatGroupId));groups.add(body.chatGroupId);
+    if(body.aiType==='chatglm'&&++glmCalls<=2)return new Response(sse([{success:false,code:500,message:'参数不合法 private details'}]),{headers:{'content-type':'text/event-stream'}});
+    return new Response(sse([chunk(body.aiType,'stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async call=>{
+    for(let round=0;round<3;round++)for(const model of ['chatglm','qwen-instruct','deepseek-pro','kimi-k3']){
+      const response=await call({model,messages:[{role:'user',content:'之前的问题'},{role:'assistant',content:'之前模型的回答'},{role:'user',content:'继续'}]});
+      const value=await response.json();
+      if(model==='chatglm'&&round<2){assert.equal(response.status,400);assert.match(value.error.message,/业务码 500/);assert.match(value.error.message,/invalid_request/);assert.doesNotMatch(value.error.message,/private/);}
+      else{assert.equal(response.status,200);assert.equal(value.choices[0].message.content,model==='kimi-k3'?'Kimi-k3':model);}
+    }
+  },{group:'',breakerFailures:1,upstreamRetries:0,modelFetcher:async()=>({success:true,result:{records}})});
+  assert.equal(groups.size,12);assert.deepEqual(routes,Array.from({length:3},()=>records.map(record=>record.aiType)).flat());
+});
+
+test('并发切换模型时迟到的旧 token 401 复用已刷新的登录',async()=>{
+  let logins=0,releaseA,startA;
+  const aStarted=new Promise(resolve=>{startA=resolve;}),bRefreshed=new Promise(resolve=>{releaseA=resolve;});
+  const manager=new TokenManager({token:'old',username:'u',password:'p'},async()=>{logins++;return 'new';},()=>{});
+  const records=['chatglm','qwen-instruct'].map(aiType=>({aiType,rootAiType:'xinference'}));
+  try{await withServer(async(_url,options)=>{
+    const model=JSON.parse(options.body).aiType,token=options.headers['x-access-token'];
+    if(token==='old'){
+      if(model==='chatglm'){startA();await bRefreshed;}
+      return new Response('',{status:401});
+    }
+    assert.equal(token,'new');
+    if(model==='qwen-instruct')releaseA();
+    return new Response(sse([chunk(model,'stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async call=>{
+    const first=call({...request,model:'chatglm'});await aStarted;
+    const second=call({...request,model:'qwen-instruct'});
+    const responses=await Promise.all([first,second]);
+    for(const response of responses){assert.equal(response.status,200);await response.json();}
+    assert.equal(logins,1);
+  },{tokenManager:manager,concurrency:2,group:'',timeout:5000,upstreamRetries:0,modelFetcher:async()=>({success:true,result:{records}})});}
+  finally{releaseA();}
+});
+
+test('SSE 业务繁忙在输出前按预算重试，输出后不重放',async()=>{
+  let attempts=0;
+  const busy={success:false,code:500,message:'模型服务繁忙 private details'};
+  await withServer(async()=>new Response(++attempts===1?sse([busy]):sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
+    const response=await call();assert.equal(response.status,200);assert.equal((await response.json()).choices[0].message.content,'恢复');
+  },{upstreamRetries:1,timeout:5000});
+  assert.equal(attempts,2);attempts=0;
+  await withServer(async()=>{attempts++;return new Response(sse([chunk('部分'),busy]),{headers:{'content-type':'text/event-stream'}});},async call=>{
+    const response=await call({...request,stream:true}),body=await response.text();
+    assert.match(body,/部分/);assert.match(body,/业务码 500/);assert.doesNotMatch(body,/private/);
+  },{upstreamRetries:2,timeout:5000});
+  assert.equal(attempts,1);
+});
 test('未配置会话 ID 时每个请求生成网页式 ID，显式 ID 保持不变',async()=>{
   const groups=[];
   await withServer(async(_url,options)=>{
