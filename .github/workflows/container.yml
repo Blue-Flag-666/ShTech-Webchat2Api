@@ -45,6 +45,12 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [kimi-k3, deepseek-pro, chatglm, qwen-instruct]
+    env:
+      GENAI_CI_MODEL: ${{ matrix.model }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.1.0
