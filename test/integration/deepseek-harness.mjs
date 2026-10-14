@@ -24,6 +24,7 @@ const server=createServer({key:'ci-dsh-key',token:'ci-placeholder',group:'',time
   const marker='Tool declarations:\n',offset=body.chatInfo.indexOf(marker);
   let content='CI session';
   if(offset>=0){
+    assert.equal(body.maxToken,modelBudget(selected).output,'Harness must use the discovered output allowance, not the context window');
     const declarations=JSON.parse(body.chatInfo.slice(offset+marker.length).split('\n')[0]);
     for(const name of ['read','write'])assert.ok(declarations.some(tool=>tool.name===name),`DeepSeek Harness did not declare ${name}`);
     const step=++requests;assert.ok(step<=3,'Harness did not finish its tool loop');
@@ -42,13 +43,20 @@ const server=createServer({key:'ci-dsh-key',token:'ci-placeholder',group:'',time
 },async()=>({success:true,result:{records}}));
 try{
   await listenForFetch(server);
+  const discovery=await fetch(`http://127.0.0.1:${server.address().port}/v1/models`,{headers:{Authorization:'Bearer ci-dsh-key'}});
+  assert.equal(discovery.status,200);
+  const discovered=(await discovery.json()).data;
   for(selected of models){
     const directory=join(root,selected.id);await mkdir(directory);
     filePath=join(directory,'probe.txt');sentinel=`DSH_READ_${randomUUID()}`;requests=0;await writeFile(filePath,sentinel);
     const patchPath=join(directory,'ci.patch.yml'),budget=modelBudget(selected);
+    const advertised=discovered.find(model=>model.id===selected.id);
+    assert.equal(advertised.context_window,budget.context);
+    assert.equal(advertised.max_tokens,budget.output);
+    assert.equal(advertised.max_output_tokens,budget.output);
     await writeFile(patchPath,JSON.stringify([
       {id:'llm-deepseek',disabled:true},
-      {id:'llm-pi-ai',config:{providers:{shtech:{apiKeyEnv:'SHTECH_CI_KEY',api:'openai-completions',baseURL:`http://127.0.0.1:${server.address().port}/v1`,models:[{id:selected.id,contextWindow:budget.context,maxTokens:1024,input:['text']}],reasoning:'off',cacheRetention:'none'}}}},
+      {id:'llm-pi-ai',config:{providers:{shtech:{apiKeyEnv:'SHTECH_CI_KEY',api:'openai-completions',baseURL:`http://127.0.0.1:${server.address().port}/v1`,models:[{id:selected.id,contextWindow:advertised.context_window,maxTokens:advertised.max_output_tokens,input:['text']}],reasoning:'off',cacheRetention:'none'}}}},
       {id:'agent-default-model',config:{provider:'shtech',model:selected.id}},
       {id:'session-persistence-jsonl',config:{root:join(directory,'sessions'),compression:'none'}}
     ]));

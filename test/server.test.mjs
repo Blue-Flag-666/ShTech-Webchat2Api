@@ -20,6 +20,10 @@ test('无 v1 前缀的兼容路径保留鉴权、模型预算和跨路径幂等'
     assert.equal((await fetch(`${base}/models`)).status,401);
     const listing=await(await fetch(`${base}/models`,{headers})).json();assert.equal(listing.data[0].id,'qwen-instruct');
     assert.equal(listing.data[0].max_completion_tokens,4096);
+    assert.equal(listing.data[0].context_window,16384);
+    assert.equal(listing.data[0].max_tokens,4096);
+    assert.equal(listing.data[0].max_output_tokens,4096);
+    assert.deepEqual(listing.data[0].limit,{context:16384,output:4096});
     const model=await(await fetch(`${base}/models/qwen-instruct`,{headers})).json();assert.equal(model.max_completion_tokens,4096);
     const options={method:'POST',headers:{...headers,'idempotency-key':'alias-roundtrip'},body:JSON.stringify(request)};
     const first=await(await fetch(`${base}/chat/completions`,options)).json();
@@ -167,8 +171,31 @@ test('输入本身在窗口内但加显式输出额度超限时拒绝',async()=>
   const modelFetcher=async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:600}]}});
   await withServer(async()=>{throw new Error('超出窗口不应发送上游');},async call=>{
     const response=await call({...request,max_completion_tokens:500,messages:[{role:'user',content:'代码'.repeat(100)}]});
-    assert.equal(response.status,400);assert.equal((await response.json()).error.param,'messages');
+    assert.equal(response.status,400);
+    const failure=(await response.json()).error;
+    assert.equal(failure.param,'messages');assert.equal(failure.code,'context_length_exceeded');
+    assert.match(failure.message,/预留输出 500 tokens/);assert.match(failure.message,/上下文上限 600 tokens/);
   },{modelFetcher});
+});
+
+test('GLM 512K 目录区分上下文和输出额度，按发现值发起请求可正常回答',async()=>{
+  let calls=0;
+  const modelFetcher=async()=>({success:true,result:{records:[{aiType:'chatglm',rootAiType:'xinference',maxToken:524288}]}});
+  await withServer(async(_url,options)=>{
+    calls++;assert.equal(JSON.parse(options.body).maxToken,16384);
+    return new Response(sse([chunk('完成','stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async(call,base)=>{
+    const headers={authorization:`Bearer ${config.key}`};
+    const listing=await(await fetch(`${base}/v1/models`,{headers})).json();
+    const model=listing.data.find(item=>item.id==='chatglm');
+    assert.equal(model.context_window,524288);
+    for(const name of ['max_tokens','max_output_tokens','max_completion_tokens'])assert.equal(model[name],16384);
+    assert.deepEqual(model.limit,{context:524288,output:16384});
+    const detail=await(await fetch(`${base}/v1/models/chatglm`,{headers})).json();assert.deepEqual(detail,model);
+    const response=await call({model:'chatglm',messages:[{role:'user',content:'请检查项目'}],max_tokens:model.max_tokens});
+    assert.equal(response.status,200);
+  },{modelFetcher});
+  assert.equal(calls,1);
 });
 
 test('未指定输出上限时为小窗口模型保留输入空间',async()=>{

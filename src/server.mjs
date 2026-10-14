@@ -787,8 +787,12 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         if(req.method==='DELETE'&&!storedMatch[2]){const job=backgroundJobs.get(responseId);if(job){job.deleted=true;job.controller.abort();backgroundJobs.delete(responseId);}const log=backgroundStreams.get(responseId);if(log){closeBackground(log);backgroundStreams.delete(responseId);}responseStore.delete(responseId);return json(res,200,{id:responseId,object:'response.deleted',deleted:true});}
         throw error(405,'该响应资源不支持此方法');
       }
-      const publicModel=model=>({...Object.fromEntries(Object.entries(model).filter(([key])=>key!=='upstream_id')),
-        max_completion_tokens:modelBudget(model).output});
+      const publicModel=model=>{
+        const {context,output}=modelBudget(model);
+        return {...Object.fromEntries(Object.entries(model).filter(([key])=>key!=='upstream_id')),
+          context_window:context,max_tokens:output,max_output_tokens:output,max_completion_tokens:output,
+          limit:{context,output}};
+      };
       if (req.method === 'GET' && path === '/v1/models') {
         const catalogue=await models();
         if(!modelCache.confirmed)throw error(503,'模型目录暂不可用');
@@ -897,7 +901,10 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         const threshold=configured??(media.input.truncation==='auto'?autoThreshold:undefined);
         if(threshold)input.messages=manageContextMessages(input.messages,Math.min(threshold,autoThreshold),config.contextStrategy??'agent');
       }else if(config.contextAuto!==false)input.messages=manageContextMessages(input.messages,autoThreshold,config.contextStrategy??'agent');
-      if(promptSize(upstreamBody(input,config,catalogue,formatPolicy))+outputReserve>contextWindow)throw error(400,`输入和输出额度超过模型 ${selected.id} 的上下文窗口；请缩短最新请求、工具定义或工具结果，或降低输出 token 上限`,path==='/v1/responses'?'input':legacy?'prompt':'messages');
+      const inputEstimate=promptSize(upstreamBody(input,config,catalogue,formatPolicy));
+      if(inputEstimate+outputReserve>contextWindow)throw Object.assign(error(400,
+        `输入和输出额度超过模型 ${selected.id} 的上下文窗口（context_length_exceeded）：估算输入 ${inputEstimate} tokens，预留输出 ${outputReserve} tokens，上下文上限 ${contextWindow} tokens；请缩短最新请求、工具定义或工具结果，或降低输出 token 上限`,
+        path==='/v1/responses'?'input':legacy?'prompt':'messages'),{code:'context_length_exceeded'});
       const retainedImageInputs=retainedImages(media,input.messages);
       if(retainedImageInputs.length&&!selected.capabilities?.vision)throw error(400,`模型 ${selected.id} 未确认支持图片输入`,'model');
       if(path==='/v1/responses'&&media.input.background===true){

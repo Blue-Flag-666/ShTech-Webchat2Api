@@ -50,6 +50,8 @@ OpenCode V2 将末尾的 `opencode` 换成 `opencode-v2`。
 | DeepSeek Harness | Settings → Models → Custom model API；Provider ID 填 `shtech`，选择 OpenAI Chat Completions |
 | AiderDesk | Model Library → OpenAI Compatible；模型选择使用 `openai-compatible/` 前缀 |
 
+DeepSeek Harness 中 Context window 和 Max output tokens 应分别填写：以 chatglm 为例，上下文 `524288`、输出 `16384`；也可刷新模型列表自动读取。更新前已保存的模型配置需重新设置输出额度。
+
 无法连接时运行 `doctor`；重新配置使用 `init --force`。`.env` 和生成的客户端配置包含凭证，请勿上传或分享。
 
 ## Docker
