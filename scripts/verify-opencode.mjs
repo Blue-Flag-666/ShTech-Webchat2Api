@@ -39,7 +39,7 @@ const server=createServer({key:'ci-local-key',token:'ci-placeholder',group:'',ti
 try{
   await listenForFetch(server);
   const config=opencodeConfig(modelDirectory(records),`http://127.0.0.1:${server.address().port}/v1`,'ci-local-key');
-  Object.assign(config,{small_model:config.model,enabled_providers:['shtech'],autoupdate:false,share:'disabled',permission:{'*':'deny',read:'allow'}});
+  Object.assign(config,{small_model:config.model,enabled_providers:['shtech'],autoupdate:false,share:'disabled',permission:{'*':'deny',read:'allow',external_directory:{[`${directory}/*`]:'allow'}}});
   const configPath=join(directory,'opencode.json');await writeFile(configPath,JSON.stringify(config));
   child=spawn('opencode',['run','--format','json','--model',config.model,`Read ${filePath} with the read tool and report its content.`],{
     cwd:directory,stdio:['ignore','pipe','pipe'],env:{...process.env,OPENCODE_CONFIG:configPath,
