@@ -65,8 +65,10 @@ GENAI_PASSWORD=密码
 在该目录运行：
 
 ```bash
-docker run -d --name shtech-webchat-api --restart unless-stopped --env-file .env -p 127.0.0.1:8787:8787 -v shtech-webchat-data:/data --read-only --tmpfs /tmp:noexec,nosuid,size=16m --cap-drop ALL --security-opt no-new-privileges ghcr.io/blue-flag-666/shtech-webchat2api:latest
+docker run -d --name shtech-webchat-api --restart unless-stopped --env-file .env -e HOST=0.0.0.0 -p 8787:8787 -v shtech-webchat-data:/data --read-only --tmpfs /tmp:noexec,nosuid,size=16m --cap-drop ALL --security-opt no-new-privileges ghcr.io/blue-flag-666/shtech-webchat2api:latest
 ```
+
+其他电脑通过 `http://服务器IP:8787/v1` 接入，填写同一个 API Key；服务器防火墙或云安全组须允许 TCP 8787。仅需本机访问时，将端口映射改为 `127.0.0.1:8787:8787`。
 
 源码部署可复制 `.env.example` 为 `.env`，填写凭证后执行 `docker compose up -d`。直接运行源码需要 Node.js 26+：
 
