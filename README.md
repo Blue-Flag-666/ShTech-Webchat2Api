@@ -40,10 +40,12 @@ OpenCode：保持服务运行，在另一个终端执行下列命令，将输出
 其他客户端也使用上方的 Base URL、API Key 和 `/v1/models` 中的模型 ID：
 
 - [Hermes Agent](https://github.com/hermes-agent-org/hermes/blob/main/website/docs/integrations/providers.md)：运行 `hermes model`，选择 Custom endpoint，填入这三项。
-- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md)：在 Settings → Models 添加 Custom model API，协议选择 OpenAI Chat Completions，再填入这三项。
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md)：在 Settings → Models 选择 Add model provider → Custom model API，Provider ID 填 `shtech`，协议选择 OpenAI Chat Completions，再填入这三项。
 - [AiderDesk](https://aiderdesk.hotovo.com/docs/configuration/providers)：在 Model Library 添加 OpenAI Compatible，填入这三项；选择模型时使用 `openai-compatible/` 前缀。
 
 生成的配置含本地 API Key，请勿提交到 Git 或分享。
+
+CI 使用实际 OpenCode 客户端验证 Kimi、DeepSeek、GLM、Qwen 四个模型路由的流式工具调用、文件读取、修改和结果回传；模型回答由测试数据模拟，不代表学校真实模型已通过相同任务。Hermes、DeepSeek Harness、AiderDesk 的完整客户端回合仍待验证。
 
 重新配置可在终端运行：
 
