@@ -80,6 +80,31 @@ jobs:
       - run: npm install --no-save --package-lock=false --ignore-scripts @earendil-works/pi-ai@1.2.0
       - name: Check DeepSeek Harness wire client without school requests
         run: node scripts/verify-pi-ai.mjs
+  hermes-compat:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: hermes-agent-org/hermes
+          ref: 036cbdfa0a3158454a0a2a7a7388cf70353326b4
+          path: .ci-hermes
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26.11.1'
+          cache: npm
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.x'
+      - run: npm install --global npm@12.2.0 --ignore-scripts
+      - run: npm ci --ignore-scripts
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install ./.ci-hermes
+      - name: Check actual Hermes agent without school requests
+        run: node scripts/verify-hermes.mjs
   image-test:
     needs: test
     runs-on: ubuntu-latest
@@ -174,7 +199,7 @@ jobs:
           path: dist/${{ matrix.artifact }}
           archive: false
   publish:
-    needs: [image-test, opencode-compat, pi-ai-compat]
+    needs: [image-test, opencode-compat, pi-ai-compat, hermes-compat]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
