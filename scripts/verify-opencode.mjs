@@ -16,7 +16,7 @@ const sentinel=`READ_RESULT_${randomUUID()}`,filePath=join(directory,'probe.txt'
 await writeFile(filePath,sentinel);
 const records=[{aiType:'Kimi-k3',aiName:'Kimi-K3',rootAiType:'xinference',status:'3',maxToken:1048576}];
 let toolRequests=0,readRequested=false,resultReturned=false,child,childClosed;
-const server=createServer({key:'ci-local-key',token:'ci-placeholder',timeout:10000,contextAuto:true},async(url,options)=>{
+const server=createServer({key:'ci-local-key',token:'ci-placeholder',group:'',timeout:10000,contextAuto:true},async(url,options)=>{
   assert.equal(new URL(url).pathname,'/htk/chat/start/chat');
   const body=JSON.parse(options.body);
   assert.equal(body.aiType,'Kimi-k3');assert.equal(body.rootAiType,'xinference');
