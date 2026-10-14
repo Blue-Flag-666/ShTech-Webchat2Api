@@ -5,8 +5,10 @@ WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm install --global npm@12.2.0 --ignore-scripts && npm ci --ignore-scripts
 COPY src ./src
-COPY scripts/build-server.mjs ./scripts/build-server.mjs
+COPY scripts/build-server.mjs scripts/bundle.mjs ./scripts/
 RUN npm run build:server
+RUN apk add --no-cache binutils \
+  && strip --strip-unneeded /usr/local/bin/node
 
 FROM alpine:3.24.2
 
@@ -15,7 +17,7 @@ RUN apk add --no-cache ca-certificates libstdc++ libatomic \
   && adduser -u 1000 -G node -s /sbin/nologin -D node \
   && mkdir -p /data \
   && chown node:node /data
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=build /usr/local/bin/node /usr/local/bin/node
 COPY licenses/Node.js.txt /usr/share/licenses/nodejs/LICENSE
 COPY licenses/unpdf.txt /usr/share/licenses/unpdf/LICENSE
 COPY licenses/fflate.txt /usr/share/licenses/fflate/LICENSE

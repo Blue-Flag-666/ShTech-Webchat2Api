@@ -11,4 +11,5 @@
 !src/*.mjs
 !scripts/
 !scripts/build-server.mjs
+!scripts/bundle.mjs
 !.env.example

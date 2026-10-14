@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { strToU8, zipSync } from 'fflate';
 import { envValue } from '../../src/cli-config.mjs';
+import { checkPackagedPdf } from './packaged-pdf.mjs';
 
 if(!process.argv[2])throw new Error('Provide the packaged executable path');
 const executable=resolve(process.argv[2]);
@@ -59,6 +60,7 @@ async function waitReady(){
 try{
   launch();await waitReady();
   assert.equal((await request('/health')).persistence_enabled,true);
+  await checkPackagedPdf(base,key);
   const form=new FormData();form.append('purpose','assistants');
   const archive=zipSync({'project/src/deploy.ts':strToU8('export const deployment = 42;')});
   form.append('file',new File([archive],'package-check.zip',{type:'application/zip'}));

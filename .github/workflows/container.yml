@@ -164,6 +164,11 @@ jobs:
           done
           docker logs proxy
           exit 1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26.11.1'
+      - name: Check PDF parser in packaged image without upstream requests
+        run: node test/integration/packaged-pdf.mjs http://127.0.0.1:8787 ci-local-key
       - if: always()
         name: Report image footprint
         run: |
@@ -202,6 +207,9 @@ jobs:
           cache: npm
       - run: npm install --global npm@12.2.0 --ignore-scripts
       - run: npm ci
+      - name: Install Linux binary size tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes binutils
       - run: npm run build:cli
       - name: Smoke test Windows executable
         if: runner.os == 'Windows'

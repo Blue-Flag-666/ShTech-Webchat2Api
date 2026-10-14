@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { build } from 'esbuild';
+import { compressedBundle } from './bundle.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const dist = join(root, 'dist');
@@ -17,13 +17,22 @@ if (!['x64','arm64'].includes(process.arch)) throw new Error('CLI 目前只打�
 
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });
-await build({ entryPoints: [join(root, 'src/cli.mjs')], outfile: bundle, bundle: true,
-  platform: 'node', format: 'cjs', target: 'node26', minify: true, sourcemap: false });
+await compressedBundle(join(root, 'src/cli.mjs'), bundle);
+let executable = process.execPath;
+if (process.platform === 'linux') {
+  executable = join(dist, 'node-runtime');
+  await copyFile(process.execPath, executable);
+  const stripped = spawnSync('strip', ['--strip-unneeded', executable], { stdio: 'inherit' });
+  if (stripped.error || stripped.status !== 0) throw new Error('Linux CLI 构建需要 binutils 的 strip 工具', { cause: stripped.error });
+  console.log(`Node runtime: ${(await stat(process.execPath)).size} -> ${(await stat(executable)).size} bytes`);
+}
 await writeFile(config, JSON.stringify({ main: bundle, mainFormat: 'commonjs', output,
-  disableExperimentalSEAWarning: true, useSnapshot: false, useCodeCache: true }, null, 2));
+  executable, disableExperimentalSEAWarning: true, useSnapshot: false, useCodeCache: false }, null, 2));
 const result = spawnSync(process.execPath, ['--build-sea', config], { stdio: 'inherit' });
 if (result.status !== 0) throw new Error(`Node SEA 构建失败，退出码 ${result.status}`);
 if (process.platform !== 'win32') await chmod(output, 0o755);
 await rm(bundle, { force: true });
 await rm(config, { force: true });
+if (executable !== process.execPath) await rm(executable, { force: true });
+console.log(`Executable bytes: ${(await stat(output)).size}`);
 console.log(output);
