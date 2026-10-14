@@ -63,7 +63,8 @@ try{
   assert.ok(ready,`AiderDesk did not start\n${appOutput}`);
   const settings=await api('/settings');await api('/settings','POST',{...settings,telemetryEnabled:false,aiderDeskAutoUpdate:false});
   await api('/providers','POST',[{id:'shtech',name:'School CI',provider:{name:'openai-compatible',apiKey:'ci-aider-key',baseUrl:env.OPENAI_API_BASE}}]);
-  const discovered=await api('/models?reload=true');
+  const discovery=await api('/models?reload=true'),discovered=discovery.models;
+  assert.ok(Array.isArray(discovered),`Invalid model discovery response: ${JSON.stringify(discovery)}`);
   for(const model of models)assert.ok(discovered.some(item=>item.id===model.id&&item.providerId==='shtech'),`Model discovery lost ${model.id}`);
   const profiles=await api('/agent-profiles');assert.ok(profiles.length,'AiderDesk did not create default profiles');
   const template=profiles.find(profile=>profile.id==='default')||profiles[0];
