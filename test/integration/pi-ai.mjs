@@ -1,9 +1,9 @@
 // Exercise the current Pi AI wire client used by DeepSeek Harness, in CI only.
 import assert from 'node:assert/strict';
 import { stream } from '@earendil-works/pi-ai/api/openai-completions';
-import { createServer } from '../src/server.mjs';
-import { modelDirectory, modelBudget } from '../src/models.mjs';
-import { listenForFetch } from '../test/fixtures.mjs';
+import { createServer } from '../../src/server.mjs';
+import { modelDirectory, modelBudget } from '../../src/models.mjs';
+import { listenForFetch } from '../fixtures.mjs';
 
 if(process.env.CI!=='true')throw new Error('This client check is restricted to CI');
 const records=[

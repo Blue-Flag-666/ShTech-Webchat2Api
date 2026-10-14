@@ -5,10 +5,10 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from '../src/server.mjs';
-import { modelDirectory } from '../src/models.mjs';
-import { opencodeConfig } from '../src/opencode.mjs';
-import { listenForFetch } from '../test/fixtures.mjs';
+import { createServer } from '../../src/server.mjs';
+import { modelDirectory } from '../../src/models.mjs';
+import { opencodeConfig } from '../../src/opencode.mjs';
+import { listenForFetch } from '../fixtures.mjs';
 
 if(process.env.CI!=='true')throw new Error('This harness check is restricted to CI');
 const directory=await mkdtemp(join(tmpdir(),'shtech-opencode-'));

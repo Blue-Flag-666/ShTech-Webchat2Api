@@ -5,9 +5,9 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createServer } from '../src/server.mjs';
-import { modelDirectory } from '../src/models.mjs';
-import { listenForFetch } from '../test/fixtures.mjs';
+import { createServer } from '../../src/server.mjs';
+import { modelDirectory } from '../../src/models.mjs';
+import { listenForFetch } from '../fixtures.mjs';
 
 if(process.env.CI!=='true')throw new Error('This harness check is restricted to CI');
 const records=[
@@ -49,7 +49,7 @@ try{
     directory=join(root,selected.id);filePath=join(directory,'probe.txt');
     const {mkdir}=await import('node:fs/promises');await mkdir(directory);
     sentinel=`HERMES_READ_${randomUUID()}`;requests=0;await writeFile(filePath,sentinel);
-    child=spawn('python',[resolve('scripts/hermes-probe.py')],{cwd:directory,stdio:['ignore','pipe','pipe'],env:{...process.env,
+    child=spawn('python',[resolve('test/integration/hermes-probe.py')],{cwd:directory,stdio:['ignore','pipe','pipe'],env:{...process.env,
       PYTHONPATH:resolve('.ci-hermes'),HERMES_HOME:join(directory,'home'),TERMINAL_ENV:'local',TERMINAL_CWD:directory,
       GENAI_CI_URL:`http://127.0.0.1:${server.address().port}/v1`,GENAI_CI_MODEL:selected.id,GENAI_CI_FILE:filePath,
       HERMES_ENABLE_PLUGINS:'false',HERMES_DISABLE_TELEMETRY:'1'}});

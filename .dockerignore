@@ -3,10 +3,10 @@
 !Dockerfile
 !package.json
 !package-lock.json
-!THIRD_PARTY_LICENSES/
-!THIRD_PARTY_LICENSES/Node.js.txt
-!THIRD_PARTY_LICENSES/unpdf.txt
-!THIRD_PARTY_LICENSES/fflate.txt
+!licenses/
+!licenses/Node.js.txt
+!licenses/unpdf.txt
+!licenses/fflate.txt
 !src/
 !src/*.mjs
 !scripts/

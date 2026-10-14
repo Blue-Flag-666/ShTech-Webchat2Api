@@ -5,9 +5,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { generateText, jsonSchema, stepCountIs, streamText, tool } from 'ai';
 import { strToU8, zipSync } from 'fflate';
-import { createServer } from '../src/server.mjs';
-import { opencodeConfig } from '../src/opencode.mjs';
-import { listenForFetch, confirmedModels } from './fixtures.mjs';
+import { createServer } from '../../src/server.mjs';
+import { opencodeConfig } from '../../src/opencode.mjs';
+import { listenForFetch, confirmedModels } from '../fixtures.mjs';
 
 async function fixture(run) {
   const server=createServer({key:'test',token:'token',group:'g',timeout:5000},async()=>{

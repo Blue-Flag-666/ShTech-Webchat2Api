@@ -11,7 +11,7 @@
     "build:cli": "node scripts/build-cli.mjs",
     "build:server": "node scripts/build-server.mjs",
     "test": "node --test --test-timeout=30000 test/*.test.mjs",
-    "test:sdk": "node --test --test-timeout=30000 test/sdk-compat.ci.mjs"
+    "test:sdk": "node --test --test-timeout=30000 test/integration/sdk.ci.mjs"
   },
   "devDependencies": {
     "@ai-sdk/openai-compatible": "^3.0.68",

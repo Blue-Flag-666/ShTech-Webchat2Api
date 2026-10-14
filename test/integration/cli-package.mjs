@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { strToU8, zipSync } from 'fflate';
-import { envValue } from '../src/cli-config.mjs';
+import { envValue } from '../../src/cli-config.mjs';
 
 if(!process.argv[2])throw new Error('Provide the packaged executable path');
 const executable=resolve(process.argv[2]);
