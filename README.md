@@ -45,7 +45,7 @@ OpenCode：保持服务运行，在另一个终端执行下列命令，将输出
 
 生成的配置含本地 API Key，请勿提交到 Git 或分享。
 
-CI 使用实际 OpenCode 客户端验证 Kimi、DeepSeek、GLM、Qwen 四个模型路由的流式工具调用、文件读取、修改和结果回传；模型回答由测试数据模拟，不代表学校真实模型已通过相同任务。Hermes、DeepSeek Harness、AiderDesk 的完整客户端回合仍待验证。
+CI 使用实际 OpenCode 和 Hermes Agent 验证 Kimi、DeepSeek、GLM、Qwen 四个模型路由的流式工具调用、文件读取、修改和结果回传，并检查 DeepSeek Harness 使用的 Pi AI 协议客户端。模型回答由测试数据模拟，不代表学校真实模型已通过相同任务；DeepSeek Harness 和 AiderDesk 的完整应用回合仍待验证。
 
 重新配置可在终端运行：
 
