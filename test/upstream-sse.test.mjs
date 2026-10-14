@@ -23,7 +23,7 @@ test('兼容消息式和旧版文本选择项，不覆盖已提供的增量内�
 });
 
 test('识别控制消息，同时保留真实业务失败及 token 失效信息',()=>{
-  for(const value of [{},{type:'ping'},{event:'heartbeat'},{id:'request-1',model:'m'},{success:true,code:200,result:null}])assert.equal(normalizeUpstreamEvent(event(value)),null);
+  for(const value of [{},{type:'ping'},{event:'heartbeat'},{heartbeat:123},{status:'running'},{request_id:'request-1',conversation_id:'c'},{id:'request-1',model:'m'},{success:true,code:200,result:null},{code:'200',msg:'ok',data:null}])assert.equal(normalizeUpstreamEvent(event(value)),null);
   assert.equal(normalizeUpstreamEvent({event:'ping',data:'1700000000'}),null);
   assert.equal(normalizeUpstreamEvent({event:'message',data:'[DONE]'}).data,'[DONE]');
   for(const value of [{success:false,message:'denied'},{code:401,msg:'expired'},{code:503,message:'busy'},{error:{message:'denied'}}])assert.deepEqual(decode({result:value}),value);

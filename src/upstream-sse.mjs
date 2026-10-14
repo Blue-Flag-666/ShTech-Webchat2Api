@@ -1,6 +1,6 @@
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const controls = new Set(['ping', 'pong', 'heartbeat', 'keepalive', 'keep-alive']);
-const metadata = new Set(['id', 'object', 'created', 'model', 'system_fingerprint', 'success', 'code', 'message', 'msg', 'status', 'type', 'event', 'chatGroupId', 'chatId', 'requestId', 'conversationId', 'title', 'timestamp', 'data', 'result']);
+const metadata = new Set(['id', 'object', 'created', 'model', 'system_fingerprint', 'success', 'code', 'message', 'msg', 'status', 'type', 'event', 'chatGroupId', 'chatId', 'requestId', 'conversationId', 'chat_group_id', 'chat_id', 'request_id', 'conversation_id', 'sessionId', 'session_id', 'traceId', 'trace_id', 'title', 'timestamp', 'data', 'result', 'ping', 'pong', 'heartbeat']);
 const markers = new Set(['[DONE]', '[done]']);
 
 export function protocolFailure(message) {
@@ -56,7 +56,7 @@ export function normalizeUpstreamEvent(item) {
     const kind = value.type ?? value.event;
     const status = value.status;
     const safeStatus = status === undefined || [0, 200, 'ok', 'success', 'start', 'processing', 'running', 'connected'].includes(status) || controls.has(String(status).toLowerCase());
-    const explicitControl = controls.has(event) || kind !== undefined || value.success === true || [0, 200].includes(value.code);
+    const explicitControl = controls.has(event) || kind !== undefined || status !== undefined && safeStatus || value.success === true || value.code !== undefined && [0, 200].includes(Number(value.code));
     if ((!keys.length || keys.every(key => metadata.has(key))) &&
       (kind === undefined || controls.has(String(kind).toLowerCase()) || ['metadata', 'status', 'start'].includes(kind)) &&
       safeStatus && (explicitControl || value.message === undefined && value.msg === undefined && status === undefined) &&
