@@ -178,24 +178,39 @@ test('输入本身在窗口内但加显式输出额度超限时拒绝',async()=>
   },{modelFetcher});
 });
 
-test('GLM 512K 目录区分上下文和输出额度，按发现值发起请求可正常回答',async()=>{
+test('四种模型和别名均区分上下文与输出额度，按发现值请求可正常回答',async()=>{
   let calls=0;
-  const modelFetcher=async()=>({success:true,result:{records:[{aiType:'chatglm',rootAiType:'xinference',maxToken:524288}]}});
+  const records=[
+    {aiType:'chatglm',aiName:'GLM-5.3-Flash',maxToken:524288},
+    {aiType:'deepseek-pro',aiName:'DeepSeek-V4.1-Flash',maxToken:524288},
+    {aiType:'qwen-instruct',aiName:'Qwen-3.8',maxToken:524288},
+    {aiType:'Kimi-k3',aiName:'Kimi-K3',maxToken:1048576}
+  ].map(record=>({...record,rootAiType:'xinference'}));
+  const expected=new Map([['chatglm',[524288,16384]],['deepseek-pro',[524288,16384]],['qwen-instruct',[524288,16384]],['Kimi-k3',[1048576,131072]]]);
+  const modelFetcher=async()=>({success:true,result:{records}});
   await withServer(async(_url,options)=>{
-    calls++;assert.equal(JSON.parse(options.body).maxToken,16384);
+    calls++;const body=JSON.parse(options.body);assert.equal(body.maxToken,expected.get(body.aiType)[1]);
     return new Response(sse([chunk('完成','stop')]),{headers:{'content-type':'text/event-stream'}});
   },async(call,base)=>{
     const headers={authorization:`Bearer ${config.key}`};
     const listing=await(await fetch(`${base}/v1/models`,{headers})).json();
-    const model=listing.data.find(item=>item.id==='chatglm');
-    assert.equal(model.context_window,524288);
-    for(const name of ['max_tokens','max_output_tokens','max_completion_tokens'])assert.equal(model[name],16384);
-    assert.deepEqual(model.limit,{context:524288,output:16384});
-    const detail=await(await fetch(`${base}/v1/models/chatglm`,{headers})).json();assert.deepEqual(detail,model);
-    const response=await call({model:'chatglm',messages:[{role:'user',content:'请检查项目'}],max_tokens:model.max_tokens});
-    assert.equal(response.status,200);
+    assert.equal(listing.data.length,4);
+    for(const record of records){
+      const id=record.aiType.toLowerCase(),model=listing.data.find(item=>item.id===id);
+      const [context,output]=expected.get(record.aiType);
+      assert.equal(model.context_window,context);
+      for(const name of ['max_tokens','max_output_tokens','max_completion_tokens'])assert.equal(model[name],output);
+      assert.deepEqual(model.limit,{context,output});
+      const alias=record.aiName.toLowerCase();
+      for(const selected of new Set([id,record.aiType,alias])){
+        const detail=await(await fetch(`${base}/v1/models/${selected}`,{headers})).json();
+        assert.equal(detail.context_window,context);assert.equal(detail.max_tokens,output);
+        const response=await call({model:selected,messages:[{role:'user',content:'请检查项目'}],max_tokens:detail.max_tokens});
+        assert.equal(response.status,200);
+      }
+    }
   },{modelFetcher});
-  assert.equal(calls,1);
+  assert.equal(calls,8);
 });
 
 test('未指定输出上限时为小窗口模型保留输入空间',async()=>{

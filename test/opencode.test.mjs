@@ -3,6 +3,22 @@ import assert from 'node:assert/strict';
 import { opencodeConfig, opencodeV2Config } from '../src/opencode.mjs';
 import { modelDirectory } from '../src/models.mjs';
 
+test('两版 OpenCode 的四种模型均保留上下文空间而不将整窗用作输出',()=>{
+  const models=modelDirectory([
+    {aiType:'Kimi-k3',maxToken:1048576},
+    {aiType:'chatglm',maxToken:524288},
+    {aiType:'deepseek-pro',maxToken:524288},
+    {aiType:'qwen-instruct',maxToken:524288}
+  ].map(record=>({...record,rootAiType:'xinference'})));
+  const v1=opencodeConfig(models,'http://127.0.0.1:8787/v1','test');
+  const v2=opencodeV2Config(models,'http://127.0.0.1:8787/v1','test');
+  for(const model of models.filter(model=>model.primary)){
+    const expected=model.id==='kimi-k3'?{context:1048576,output:131072}:{context:524288,output:16384};
+    assert.deepEqual(v1.provider.shtech.models[model.id].limit,expected);
+    assert.deepEqual(v2.providers.shtech.models[model.id].limit,expected);
+  }
+});
+
 test('Kimi 路由 ID 更新后两版 OpenCode 仍使用规范 ID 和 Kimi 输出预算',()=>{
   const models=modelDirectory([
     {aiType:'cloud-kimi',aiName:'Kimi-K3',rootAiType:'azure',maxToken:1048576},
