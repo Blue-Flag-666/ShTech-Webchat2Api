@@ -21,6 +21,7 @@ import { DiskState } from './persistence.mjs';
 import { Metrics } from './metrics.mjs';
 import { IdempotencyStore } from './idempotency.mjs';
 import { RequestLogger } from './request-log.mjs';
+import { normalizeUpstreamEvent, protocolFailure } from './upstream-sse.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
 const GROUP_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-';
@@ -310,9 +311,12 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
     if(!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
       await response.body?.cancel();throw error(502,'上游没有返回 SSE，可能登录已失效');
     }
-    let emitted=false,retry=false,seenChoice=false,finished=false,pending=[],pendingBytes=0;
+    let emitted=false,retry=false,seenChoice=false,finished=false,pending=[],pendingBytes=0,ignored=0;
     try{
-      for await(const item of events(response.body)) {
+      for await(const rawItem of events(response.body)) {
+        if(rawItem.event==='error')throw error(502,'上游返回错误事件');
+        const item=normalizeUpstreamEvent(rawItem);
+        if(!item){if(++ignored>1024)throw protocolFailure('上游发送过多 SSE 控制消息');continue;}
         if(item.data==='[DONE]'){
           if(!seenChoice)throw error(502,'上游 SSE 缺少响应选择项');
           finished=true;emitted=true;yield item;continue;
@@ -320,13 +324,14 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
         if(item.event==='error')throw error(502,'上游返回错误事件');
         let value;try{value=JSON.parse(item.data);}catch{throw error(502,'上游 SSE 包含无效 JSON');}
         if(value?.error)throw error(502,'上游返回错误');
-        const message=typeof value?.message==='string'?value.message:'';
-        const expired=(value?.success===false || value?.code===401) && /token.*(?:失效|过期|expired|invalid)|请重新登录|登录已过期/i.test(message);
+        const message=typeof value?.message==='string'?value.message:typeof value?.msg==='string'?value.msg:'';
+        const expired=Number(value?.code)===401 || value?.success===false && /token.*(?:失效|过期|expired|invalid)|请重新登录|登录已过期/i.test(message);
         if(expired) {
           if(!emitted && !renewed && tokenManager.renewable){retry=true;break;}
           throw error(401,'上游登录已失效');
         }
-        if(!Array.isArray(value?.choices)&&value?.other===undefined&&value?.usage===undefined)throw error(502,'未知上游 SSE 格式');
+        if(value?.success===false||Number(value?.code)>=400)throw error([401,403,429,503,504].includes(Number(value.code))?Number(value.code):502,'上游返回业务错误');
+        if(!Array.isArray(value?.choices)&&value?.other===undefined&&value?.usage===undefined)throw protocolFailure('未知上游 SSE 格式');
         if(Array.isArray(value?.choices)&&value.choices.length){
           seenChoice=true;
           if(value.choices[0]?.finish_reason!=null)finished=true;
@@ -341,6 +346,10 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
         emitted=true;yield item;
       }
     }catch(cause){
+      if(cause.upstreamProtocol)console.warn(`[上游协议] ${cause.message}`);
+      if(!emitted&&!options.signal?.aborted&&cause.upstreamProtocol&&attempt<Math.min(retries,1)){
+        await delay(upstreamBackoff(502,attempt++),options.signal);continue;
+      }
       if(emitted||options.signal?.aborted||!retryableNetworkError(cause)||attempt>=retries)throw cause;
       await delay(upstreamBackoff(502,attempt++),options.signal);
       continue;
@@ -364,7 +373,7 @@ export async function* guardedEvents(source,circuit,model,signal) {
   try{yield* source;completed=true;}
   catch(cause){
     failed=true;
-    if(!signal?.aborted&&(!cause.status||[502,503,504].includes(cause.status)))circuit.failure(model);
+    if(!signal?.aborted&&!cause.upstreamProtocol&&(!cause.status||[502,503,504].includes(cause.status)))circuit.failure(model);
     else circuit.release(model);
     throw cause;
   }finally{if(!failed){if(completed)circuit.success(model);else circuit.release(model);}}

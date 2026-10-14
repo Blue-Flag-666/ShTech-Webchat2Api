@@ -245,15 +245,66 @@ test('连续上游故障触发按模型熔断并返回等待时间',async()=>{
   },{upstreamRetries:0,breakerFailures:2,breakerCooldown:1000});
   assert.equal(attempts,2);
 });
-test('损坏的上游 SSE 被计入模型熔断',async()=>{
+test('协议格式错误不会将健康模型熔断，下一次正常响应可恢复',async()=>{
   let attempts=0;
-  await withServer(async()=>{attempts++;return new Response('data: not-json\n\n',{headers:{'content-type':'text/event-stream'}});},async call=>{
+  await withServer(async()=>new Response(++attempts<=2?'data: not-json\n\n':sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
     assert.equal((await call()).status,502);
     assert.equal((await call()).status,502);
-    const blocked=await call();assert.equal(blocked.status,503);
-    assert.equal(blocked.headers.get('retry-after'),'1');
+    const recovered=await call();assert.equal(recovered.status,200);
+    assert.equal((await recovered.json()).choices[0].message.content,'恢复');
   },{upstreamRetries:0,breakerFailures:2,breakerCooldown:1000});
+  assert.equal(attempts,3);
+});
+
+test('SSE 心跳、前置状态、嵌套正文和缺省 index 可混合且不丢失文本与推理',async()=>{
+  const frames='event: ping\ndata: ping\n\n'+sse([
+    {success:true,code:200,message:'accepted',result:null},
+    {chatGroupId:'metadata-only'},
+    {success:true,result:{choices:[{delta:{reasoning_content:'分析'},finish_reason:null}]}},
+    {data:JSON.stringify({choices:[{delta:{content:'正常'},finish_reason:null}]})},
+    {type:'heartbeat',timestamp:1},
+    {success:true,data:{choices:[{delta:{content:'回答'},finish_reason:'stop'}]}}
+  ])+'data: [DONE]\n\n';
+  await withServer(async()=>new Response(frames,{headers:{'content-type':'text/event-stream'}}),async call=>{
+    const response=await call();assert.equal(response.status,200);
+    const value=await response.json();assert.equal(value.choices[0].message.content,'正常回答');
+    assert.equal(value.choices[0].message.reasoning_content,'分析');
+  },{upstreamRetries:0});
+});
+
+test('包装中的 SSE 401 可刷新登录，业务 503 不会被当作心跳忽略',async()=>{
+  let attempts=0,logins=0;
+  const manager=new TokenManager({token:'old',username:'u',password:'p'},async()=>{logins++;return 'new';},()=>{});
+  await withServer(async()=>new Response(++attempts===1?sse([{success:true,result:{code:'401',msg:'expired'}}]):sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
+    const response=await call();assert.equal(response.status,200);
+    assert.equal((await response.json()).choices[0].message.content,'恢复');
+  },{tokenManager:manager,upstreamRetries:0});
+  assert.equal(logins,1);assert.equal(attempts,2);
+  await withServer(async()=>new Response(sse([{success:true,result:{code:503,message:'private server message'}}]),{headers:{'content-type':'text/event-stream'}}),async call=>{
+    const response=await call();assert.equal(response.status,503);
+    assert.doesNotMatch((await response.json()).error.message,/private/);
+  },{upstreamRetries:0});
+});
+
+test('首个输出前协议错误最多重试一次，输出后不重放',async()=>{
+  let attempts=0;
+  await withServer(async()=>new Response(++attempts===1?sse([{unrecognized:'private text'}]):sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
+    const response=await call();assert.equal(response.status,200);
+    assert.equal((await response.json()).choices[0].message.content,'恢复');
+  },{upstreamRetries:2,timeout:5000});
   assert.equal(attempts,2);
+  attempts=0;
+  await withServer(async()=>{attempts++;return new Response(sse([{unrecognized:'private text'}]),{headers:{'content-type':'text/event-stream'}});},async call=>{
+    const response=await call();assert.equal(response.status,502);
+    assert.doesNotMatch((await response.json()).error.message,/private text/);
+  },{upstreamRetries:2,timeout:5000});
+  assert.equal(attempts,2);
+  attempts=0;
+  await withServer(async()=>{attempts++;return new Response(sse([chunk('部分'),{unrecognized:'private text'}]),{headers:{'content-type':'text/event-stream'}});},async call=>{
+    const response=await call({...request,stream:true});
+    const body=await response.text();assert.match(body,/部分/);assert.match(body,/upstream_error/);
+  },{upstreamRetries:2,timeout:5000});
+  assert.equal(attempts,1);
 });
 test('缺少完成标记的 SSE 被计入模型熔断',async()=>{
   let attempts=0;
