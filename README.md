@@ -2,6 +2,8 @@
 
 将 `genai.shanghaitech.edu.cn` Webchat 转换为兼容 OpenAI Chat Completions、Responses 和 Anthropic Messages 的本地 API。重点适配学校部署的 Kimi K3，供 OpenCode 和其他代码 Agent 使用；模型目录只暴露学校明确标记为 Xinference 自有部署的聊天模型。
 
+转换服务需要在能够访问学校 GenAI 的校内网络运行。GitHub Actions 的兼容性检查使用模拟上游，不访问学校接口。
+
 ## 快速使用
 
 从 [Releases](https://github.com/Blue-Flag-666/ShTech-Webchat2Api/releases/latest) 下载与你电脑对应的单文件程序：
@@ -113,6 +115,8 @@ npm start
 ```
 
 ## 协议支持
+
+另支持 `/chat/completions`、`/models`、`/models/{id}` 和 `/tokenizers/estimate-token-count`，行为与对应的 `/v1` 路径一致。
 
 | 接口 | 鉴权 | 输入与工具 | 流结束 |
 |---|---|---|---|

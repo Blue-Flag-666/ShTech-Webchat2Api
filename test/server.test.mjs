@@ -11,6 +11,25 @@ const request = { model: 'qwen-instruct', messages: [{role:'user',content:'你�
 const chunk = (content, finish = null) => ({ id:'chatcmpl-test', object:'chat.completion.chunk', model:'qwen-instruct', created:123, choices:[{index:0,delta:{content},finish_reason:finish}] });
 const sse = values => values.map(v => `data: ${typeof v === 'string' ? v : JSON.stringify(v)}\n\n`).join('');
 
+test('无 v1 前缀的兼容路径保留鉴权、模型预算和跨路径幂等',async()=>{
+  let calls=0;
+  const server=createServer(config,async()=>{calls++;return new Response(sse([chunk('你好'),chunk('', 'stop')]),{headers:{'content-type':'text/event-stream'}});},confirmedModels);
+  await listenForFetch(server);
+  const base=`http://127.0.0.1:${server.address().port}`,headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
+  try{
+    assert.equal((await fetch(`${base}/models`)).status,401);
+    const listing=await(await fetch(`${base}/models`,{headers})).json();assert.equal(listing.data[0].id,'qwen-instruct');
+    assert.equal(listing.data[0].max_completion_tokens,4096);
+    const model=await(await fetch(`${base}/models/qwen-instruct`,{headers})).json();assert.equal(model.max_completion_tokens,4096);
+    const options={method:'POST',headers:{...headers,'idempotency-key':'alias-roundtrip'},body:JSON.stringify(request)};
+    const first=await(await fetch(`${base}/chat/completions`,options)).json();
+    const repeated=await(await fetch(`${base}/v1/chat/completions`,options)).json();
+    assert.equal(first.choices[0].message.content,'你好');assert.equal(repeated.id,first.id);assert.equal(calls,1);
+    const estimate=await fetch(`${base}/tokenizers/estimate-token-count`,{method:'POST',headers,body:JSON.stringify(request)});
+    assert.equal(estimate.status,200);assert.ok((await estimate.json()).data.total_tokens>0);assert.equal(calls,1);
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
 test('提前结束半开探测流不会清除熔断故障记录',async()=>{
   let now=1000,closed=false;
   const circuit=new UpstreamCircuit(1,1000,()=>now);

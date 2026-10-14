@@ -604,6 +604,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       requestId=typeof suppliedRequestId==='string'&&/^[A-Za-z0-9._:-]{1,128}$/.test(suppliedRequestId)?suppliedRequestId:`req_${randomUUID().replaceAll('-','')}`;
       res.setHeader('X-Request-Id',requestId);
       requestUrl=new URL(req.url,'http://localhost');path=requestUrl.pathname;
+      if(['/chat/completions','/models','/tokenizers/estimate-token-count'].includes(path)||path.startsWith('/models/'))path=`/v1${path}`;
       if(path==='/anthropic/v1/messages')path='/v1/messages';
       if(path==='/anthropic/v1/messages/count_tokens')path='/v1/messages/count_tokens';
       // Anthropic SDK reads request-id; OpenAI clients read x-request-id.
