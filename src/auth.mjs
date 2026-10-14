@@ -5,6 +5,13 @@ import { casFetch } from './transport.mjs';
 const GENAI = 'https://genai.shanghaitech.edu.cn';
 const IDS = 'https://ids.shanghaitech.edu.cn';
 const fail = message => Object.assign(new Error(message), { status: 401 });
+const loginErrors = new Set([
+  'CAS 密码加密参数无效', 'CAS 重定向到了未允许的域名', '无法找到 CAS 登录入口',
+  'CAS 登录页缺少必要参数，可能需要人工验证',
+  'CAS 登录未返回 token，请检查账号或在网页完成人工验证',
+  'CAS 登录连接失败或超时', 'CAS 返回空 token'
+]);
+const reportLogin = (event, message) => console[event === 'failure' ? 'error' : 'info'](`[登录] ${message}`);
 export function secret(env, name) {
   if (env[`${name}_FILE`]) return readFileSync(env[`${name}_FILE`], 'utf8').trimEnd();
   return env[name] || '';
@@ -79,8 +86,9 @@ export async function loginCas(username, password, fetcher = casFetch) {
   finally { clearTimeout(timeout); }
 }
 export class TokenManager {
-  constructor(config, login = loginCas) {
+  constructor(config, login = loginCas, report = reportLogin) {
     this.token=config.token || ''; this.username=config.username || ''; this.password=config.password || ''; this.login=login;
+    this.report = (event, message) => { try { report(event, message); } catch {} };
   }
   get configured() { return Boolean(this.token || (this.username && this.password)); }
   get renewable() { return Boolean(this.username && this.password); }
@@ -91,7 +99,20 @@ export class TokenManager {
     if(!force && this.token && expires>Date.now()+60000) return this.token;
     if(!this.renewable) { if(this.token && !force && expires>Date.now()) return this.token; throw fail('登录 token 已失效，请更新 GENAI_TOKEN 或配置 CAS 账号'); }
     if(!this.pending){
-      const pending=this.login(this.username,this.password).then(token=>{if(!token)throw fail('CAS 返回空 token');this.token=token;return token;});
+      const action = this.token ? 'CAS 续期' : 'CAS 登录';
+      this.report('start', `${action}开始`);
+      const pending=Promise.resolve().then(()=>this.login(this.username,this.password)).then(token=>{
+        if(!token)throw fail('CAS 返回空 token');
+        this.token=token;
+        this.report('success', `${action}成功，已取得上游 Token`);
+        return token;
+      }).catch(cause=>{
+        // Never print arbitrary upstream errors: they can contain credentials,
+        // redirect URLs with tokens, or complete request bodies.
+        const reason=loginErrors.has(cause?.message)?cause.message:'请检查校内网络、CAS 账号或在网页完成人工验证';
+        this.report('failure', `${action}失败：${reason}`);
+        throw cause;
+      });
       this.pending=pending;
       void pending.then(()=>{if(this.pending===pending)this.pending=undefined;},()=>{if(this.pending===pending)this.pending=undefined;});
     }

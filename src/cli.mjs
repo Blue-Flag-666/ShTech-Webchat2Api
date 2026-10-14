@@ -9,7 +9,7 @@ import { configuration, startServer } from './server.mjs';
 import { opencodeConfig, opencodeV2Config } from './opencode.mjs';
 import { envValue, inspectionTimeout } from './cli-config.mjs';
 
-const VERSION = '0.16.1';
+const VERSION = '0.16.2';
 const sea = isSea();
 const defaultConfig = sea ? join(dirname(process.execPath), '.env') : resolve('.env');
 

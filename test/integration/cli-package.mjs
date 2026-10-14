@@ -23,7 +23,7 @@ await writeFile(configPath,`API_KEY=${envValue(key)}\nGENAI_TOKEN=ci-placeholder
 const launchOptions={
   cwd:directory,windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,
     API_KEY_FILE:'',GENAI_TOKEN_FILE:'',
-    HOST:'127.0.0.1',PORT:String(port),GENAI_DATA_DIR:join(directory,'data'),GENAI_LOG_FILE:''}
+    HOST:'127.0.0.1',PORT:String(port),GENAI_DATA_DIR:join(directory,'data'),GENAI_LOG_FILE:'',GENAI_STARTUP_CHECK:'false'}
 };
 delete launchOptions.env.API_KEY;delete launchOptions.env.GENAI_TOKEN;
 let child,exited,output='',spawnError;

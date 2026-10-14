@@ -70,6 +70,8 @@ docker run -d --name shtech-webchat-api --restart unless-stopped --env-file .env
 
 其他电脑通过 `http://服务器IP:8787/v1` 接入，填写同一个 API Key；服务器防火墙或云安全组须允许 TCP 8787。仅需本机访问时，将端口映射改为 `127.0.0.1:8787:8787`。
 
+启动时会检查学校登录及模型访问权限，可用 `docker logs -f shtech-webchat-api` 查看结果。检查失败会记录原因，后续请求仍可重试登录。
+
 源码部署可复制 `.env.example` 为 `.env`，填写凭证后执行 `docker compose up -d`。直接运行源码需要 Node.js 26+：
 
 ```bash

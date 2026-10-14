@@ -33,6 +33,7 @@ export function configuration(env = process.env) {
     token: secret(env,'GENAI_TOKEN'), cookie: secret(env,'GENAI_COOKIE'),
     username: secret(env,'GENAI_USERNAME'), password: secret(env,'GENAI_PASSWORD'),
     group: env.GENAI_CHAT_GROUP_ID || '', key: secret(env,'API_KEY'), uploadToken:secret(env,'GENAI_UPLOAD_TOKEN'),
+    startupCheck: env.GENAI_STARTUP_CHECK !== 'false',
     netGo: bool(env.GENAI_NET_GO), timeout: Number(env.GENAI_TIMEOUT_MS || 120000), modelTtl: Number(env.GENAI_MODEL_TTL_MS || 300000),logFile:env.GENAI_LOG_FILE || '',
     concurrency:Number(env.GENAI_CONCURRENCY || 1),queueSize:Number(env.GENAI_QUEUE_SIZE || 32),queueTimeout:Number(env.GENAI_QUEUE_TIMEOUT_MS || 120000),modelLimits:modelLimitsConfig(env.GENAI_MODEL_LIMITS),
     requestLimit:Number(env.GENAI_REQUEST_LIMIT_MB || 144)*1024*1024,
@@ -529,7 +530,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         const count=new Set(modelDirectory(records).map(model=>model.upstream_id)).size;
         if(!count)throw new Error('No usable models');
         result={upstream_status:'ok',upstream_models:count,upstream_latency_ms:Date.now()-started};
-      }catch{result={upstream_status:'unavailable',upstream_models:0,upstream_latency_ms:Date.now()-started};}
+      }catch(cause){result={upstream_status:'unavailable',upstream_models:0,upstream_latency_ms:Date.now()-started,upstream_error:cause?.status===401?'authentication_failed':'connection_or_catalogue_failed'};}
       healthProbeCache={at:Date.now(),result};return result;
     })();
     try{return await healthProbePending;}finally{healthProbePending=undefined;}
@@ -1142,6 +1143,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
     } finally { clearTimeout(timer); controller?.abort(); release?.(); }
   });
+  server.checkUpstream = probeUpstream;
   server.once('close',()=>{batchStore.close();releaseDisk?.();});
   return server;
   }catch(cause){releaseDisk?.();throw cause;}
@@ -1175,9 +1177,30 @@ export function startServer(config = configuration()) {
   if (!['agent','recent'].includes(config.contextStrategy)) throw new Error('GENAI_CONTEXT_STRATEGY 必须为 agent 或 recent');
   if (config.corsOrigin && config.corsOrigin!=='*') { let origin;try{origin=new URL(config.corsOrigin);}catch{throw new Error('CORS_ORIGIN 必须是完整来源或 *');}if(origin.origin!==config.corsOrigin)throw new Error('CORS_ORIGIN 只能包含协议、主机和端口'); }
   const server=createServer(config);
-  server.listen(config.port, config.host, () => console.log(`Webchat API: http://${config.host}:${config.port}/v1`));
+  server.listen(config.port, config.host, () => {
+    console.log(`Webchat API: http://${config.host}:${config.port}/v1`);
+    if(config.startupCheck === false) {
+      console.info('[登录检查] 已禁用启动检查，上游登录状态尚未验证');
+      return;
+    }
+    void checkStartupLogin(server);
+  });
   const stop=()=>shutdown(server).then(()=>process.exit(0),()=>process.exit(1));
   process.once('SIGTERM',stop);
   process.once('SIGINT',stop);
   return server;
+}
+
+export async function checkStartupLogin(server, report = (event, message) => console[event === 'failure' ? 'error' : 'info'](`[登录检查] ${message}`)) {
+  report('start', '正在检查学校登录及模型访问权限…');
+  try {
+    const result = await server.checkUpstream();
+    if(result.upstream_status === 'ok') report('success', `成功，可访问 ${result.upstream_models} 个自部署模型`);
+    else if(result.upstream_status === 'unconfigured') report('failure', '失败：未配置 CAS 账号或 GENAI_TOKEN');
+    else report('failure', result.upstream_error === 'authentication_failed'
+      ? '失败：认证失败，请检查 CAS 账号、Token 或在网页完成人工验证；后续请求仍可重试'
+      : '失败：无法访问学校平台或读取模型目录，请检查校内网络和平台状态；后续请求仍可重试');
+  } catch {
+    report('failure', '失败：上游检查未完成；后续请求仍可重试');
+  }
 }

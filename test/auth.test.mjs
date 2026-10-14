@@ -71,3 +71,38 @@ test('取消单个请求的 token 等待不会中断其他请求共用的登录'
   assert.equal(await manager.get(),'shared-token');
   assert.equal(calls,1);
 });
+
+test('并发 CAS 登录只记录一次结果，缓存命中不重复记录，强制续期另行记录',async()=>{
+  const messages=[];let calls=0;
+  const manager=new TokenManager({username:'private-user',password:'private-password'},async()=>`private-token-${++calls}`,(event,message)=>messages.push({event,message}));
+  await Promise.all([manager.get(),manager.get(),manager.get()]);
+  await manager.get();
+  assert.equal(calls,1);
+  assert.deepEqual(messages.map(item=>item.event),['start','success']);
+  await manager.get(true);
+  assert.deepEqual(messages.map(item=>item.event),['start','success','start','success']);
+  assert.match(messages[3].message,/续期成功/);
+  assert.doesNotMatch(JSON.stringify(messages),/private-/);
+});
+
+test('CAS 失败日志不包含异常中的凭据，失败后可以重新登录',async()=>{
+  const messages=[];let calls=0;
+  const manager=new TokenManager({username:'private-user',password:'private-password'},()=>{
+    if(++calls===1)throw new Error('private-password token=private-token\nforged log');
+    return Promise.resolve('private-token');
+  },(event,message)=>messages.push({event,message}));
+  await assert.rejects(manager.get(),/private-password/);
+  assert.deepEqual(messages.map(item=>item.event),['start','failure']);
+  assert.doesNotMatch(JSON.stringify(messages),/private-|forged/);
+  assert.equal(await manager.get(),'private-token');
+  assert.equal(messages.at(-1).event,'success');
+});
+
+test('CAS 空 token 记录失败，日志回调故障不影响认证',async()=>{
+  const messages=[];
+  const manager=new TokenManager({username:'u',password:'p'},async()=>'',(event,message)=>messages.push({event,message}));
+  await assert.rejects(manager.get(),/空 token/);
+  assert.deepEqual(messages.map(item=>item.event),['start','failure']);
+  assert.match(messages.at(-1).message,/空 token/);
+  assert.equal(await new TokenManager({username:'u',password:'p'},async()=>'token',()=>{throw new Error('logger failed');}).get(),'token');
+});
