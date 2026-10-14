@@ -17,6 +17,17 @@ async function fixture(fn, answer='你好', finish='stop') {
   try {await fn(call,`http://127.0.0.1:${server.address().port}`);}finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
 }
 const requests=[['/v1/responses',{input:'你好',store:false}],['/v1/messages',{messages:[{role:'user',content:'你好'}],max_tokens:64}]];
+
+test('Chat 接受 Pi AI 的 store:false；不假装支持保存完成结果',async()=>{
+  await fixture(async call=>{
+    const body={messages:[{role:'user',content:'你好'}],store:false};
+    assert.equal((await call('/v1/chat/completions',body)).status,200);
+    for(const store of [true,null,'false']){
+      const response=await call('/v1/chat/completions',{...body,store});
+      assert.equal(response.status,400);assert.equal((await response.json()).error.param,'store');
+    }
+  });
+});
 test('Responses 与 Anthropic 400 错误标明具体参数',async()=>{
   await fixture(async call=>{
     for(const [path,body,param] of [

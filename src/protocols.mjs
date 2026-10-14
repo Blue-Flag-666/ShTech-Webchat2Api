@@ -215,6 +215,11 @@ export function normalizeRequest(path, input) {
   }
   if (path === '/v1/chat/completions') {
     const out={...input};
+    if(out.store!==undefined){
+      if(typeof out.store!=='boolean')throw bad('store 必须为布尔值','store');
+      if(out.store)throw bad('Chat Completions 暂不支持保存完成结果；请使用 Responses API','store');
+      delete out.store;
+    }
     if(out.tools!==undefined&&!Array.isArray(out.tools))throw bad('tools 必须为数组','tools');
     if(out.thinking!==undefined){
       if(!out.thinking||typeof out.thinking!=='object'||Array.isArray(out.thinking))throw bad('thinking 必须是对象','thinking');

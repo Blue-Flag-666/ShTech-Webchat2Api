@@ -65,6 +65,21 @@ jobs:
           node "$(npm root --global)/opencode-ai/postinstall.mjs"
       - name: Check actual OpenCode tool loop without school requests
         run: node scripts/verify-opencode.mjs
+  pi-ai-compat:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26.11.1'
+          cache: npm
+      - run: npm install --global npm@12.2.0 --ignore-scripts
+      - run: npm ci --ignore-scripts
+      - run: npm install --no-save --package-lock=false --ignore-scripts @earendil-works/pi-ai@1.2.0
+      - name: Check DeepSeek Harness wire client without school requests
+        run: node scripts/verify-pi-ai.mjs
   image-test:
     needs: test
     runs-on: ubuntu-latest
@@ -159,7 +174,7 @@ jobs:
           path: dist/${{ matrix.artifact }}
           archive: false
   publish:
-    needs: [image-test, opencode-compat]
+    needs: [image-test, opencode-compat, pi-ai-compat]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
