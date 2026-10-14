@@ -7,7 +7,7 @@ updates:
       day: monday
       time: "04:00"
       timezone: Asia/Shanghai
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
 
   - package-ecosystem: docker
     directory: /
@@ -16,7 +16,7 @@ updates:
       day: monday
       time: "04:15"
       timezone: Asia/Shanghai
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
 
   - package-ecosystem: github-actions
     directory: /
@@ -25,4 +25,4 @@ updates:
       day: monday
       time: "04:30"
       timezone: Asia/Shanghai
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0

@@ -1,5 +1,5 @@
 const MAX_DIFF=896*1024,MAX_LOG=512*1024;
-const diagnostics=/\b(?:error|failed|failure|panic|exception|traceback|assert(?:ion)?|fatal|segmentation fault|test suite failed)\b|错误|失败|异常|✖/i;
+const diagnostics=/\b(?:error|failed|failure|panic|exception|traceback|assert(?:ion)?(?:error)?|fatal|segmentation fault|test suite failed)\b|错误|失败|异常|✖/i;
 
 function head(value,bytes){
   const data=Buffer.from(value);let end=Math.min(bytes,data.length);

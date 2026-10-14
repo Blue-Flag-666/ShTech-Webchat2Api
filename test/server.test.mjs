@@ -420,7 +420,7 @@ test('自动缩减历史后不再上传被丢弃轮次的图片',async()=>{
       {role:'user',content:[{type:'text',text:'查看新图'},image]}
     ]});
     assert.equal(response.status,200);
-  },{modelFetcher,uploadToken:'upload-token',imageFetcher:async()=>{
+  },{modelFetcher,uploadToken:'retained-image-test-token',imageFetcher:async()=>{
     uploads++;return new Response(JSON.stringify({success:true,result:{url:`test-${uploads}.png`}}),{headers:{'content-type':'application/json'}});
   }});
   assert.equal(uploads,1);
@@ -616,7 +616,9 @@ test('Responses 默认保存 reasoning，并用 item_reference 续接 OpenCode �
       const thought=chunk('');thought.choices[0].delta.reasoning_content='先检查项目结构';
       return new Response(sse([thought,chunk('第一轮完成','stop')]),{headers:{'content-type':'text/event-stream'}});
     }
-    assert.match(JSON.stringify(body.messages),/Reasoning summary/);assert.match(JSON.stringify(body.messages),/先检查项目结构/);
+    if(calls===2)assert.match(JSON.stringify(body.messages),/Reasoning summary/);
+    else assert.equal(body.messages.find(message=>message.reasoning_content)?.reasoning_content,'先检查项目结构');
+    assert.match(JSON.stringify(body.messages),/先检查项目结构/);
     return new Response(sse([chunk('第二轮完成','stop')]),{headers:{'content-type':'text/event-stream'}});
   },async(_call,base)=>{
     const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};

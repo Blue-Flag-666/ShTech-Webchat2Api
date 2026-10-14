@@ -110,7 +110,8 @@ test('JSON 工具围栏不要求结束标记前有换行',()=>{
   assert.deepEqual(stream.finish(),{content:'准备\n完成',tool_calls:calls});
 });
 test('JSON 字符串内的反引号和工具标签不提前结束围栏',()=>{
-  const stream=createToolCallStream(toolPolicy(tools,'required'),()=> 'call_fence_string');
+  const declarations=[{type:'function',function:{name:'weather',parameters:{type:'object',properties:{city:{type:'string'},note:{type:'string'}},required:['city'],additionalProperties:false}}}];
+  const stream=createToolCallStream(toolPolicy(declarations,'required'),()=> 'call_fence_string');
   const argumentsValue={city:'上海',note:'例子 ``` <api_tool_call> 只是文本'};
   const json=JSON.stringify({name:'weather',arguments:argumentsValue});
   const boundary=json.indexOf('```')+2;

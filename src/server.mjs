@@ -1128,7 +1128,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     } catch (e) {
       idempotency.fail(res);
       const status = e.status || (controller?.signal.aborted ? timedOut?504:499 : 502),message=e.status?e.message:status===504?'上游请求超时':status===499?'客户端已断开':'无法连接上游服务';
-      const codes={400:'invalid_request',401:'invalid_api_key',403:'permission_denied',404:'not_found',405:'method_not_allowed',409:'conflict',413:'request_too_large',429:'rate_limit_exceeded',499:'client_closed_request',502:'upstream_error',503:'service_unavailable',504:'timeout',507:'insufficient_storage'},code=e.code||codes[status]||'server_error';
+      const codes={400:'invalid_request',401:'invalid_api_key',403:'permission_denied',404:'not_found',405:'method_not_allowed',409:'conflict',413:'request_too_large',429:'rate_limit_exceeded',499:'client_closed_request',502:'upstream_error',503:'service_unavailable',504:'timeout',507:'insufficient_storage'},code=e.status&&e.code?e.code:codes[status]||'server_error';
       const types={400:'invalid_request_error',401:'authentication_error',403:'permission_error',404:'not_found_error',405:'invalid_request_error',409:'conflict_error',413:'request_too_large',429:'rate_limit_error',499:'api_error',502:'api_error',503:'overloaded_error',504:'api_error',507:'api_error'};
       const payload = { ...(path === '/v1/messages' ? {type:'error'} : {}), error: { message,type:types[status]||'api_error',param:e.param??null,code } };
       if (!res.destroyed) {

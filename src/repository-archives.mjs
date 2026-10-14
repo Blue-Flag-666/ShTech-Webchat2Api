@@ -106,7 +106,7 @@ function overview(entry){
   if(binaryExtensions.test(entry.path))return `${label}: binary or packaged asset`;
   const sample=entry.bytes.subarray(0,Math.min(size,64*1024));
   if(sample.includes(0))return `${label}: binary data`;
-  const source=sample.toString('utf8');
+  const source=Buffer.from(sample).toString('utf8');
   const controls=(source.match(/[\x01-\x08\x0b\x0c\x0e-\x1f]/g)||[]).length;
   if(controls>Math.max(2,source.length/100))return `${label}: binary data`;
   const lines=source.split(/\r?\n/);
