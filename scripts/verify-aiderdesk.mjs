@@ -52,7 +52,9 @@ try{
   const base=`http://127.0.0.1:${port}/api`;
   const api=async(path,method='GET',body)=>{
     const response=await fetch(`${base}${path}`,{method,headers:{'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(10000)});
-    assert.ok(response.ok,`${path}: ${response.status} ${await response.clone().text()}`);return response.json();
+    const text=await response.text();assert.ok(response.ok,`${path}: ${response.status} ${text}`);
+    if(!text)return null;
+    try{return JSON.parse(text);}catch{throw new Error(`${path}: invalid JSON response ${text.slice(0,1000)}`);}
   };
   let ready=false;
   for(let attempt=0;attempt<90;attempt++){
