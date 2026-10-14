@@ -40,7 +40,7 @@ test('OpenAI SDK 自动分页完整读取文件、向量库和会话项',async()
     assert.deepEqual((await collect(client.vectorStores.list({limit:1}))).sort(),stores.map(store=>store.id).sort());
     const batch=await client.vectorStores.fileBatches.create(stores[0].id,{file_ids:files.map(file=>file.id)});
     assert.deepEqual((await collect(client.vectorStores.files.list(stores[0].id,{limit:1}))).sort(),expectedFiles);
-    assert.deepEqual((await collect(client.vectorStores.fileBatches.listFiles(stores[0].id,batch.id,{limit:1}))).sort(),expectedFiles);
+    assert.deepEqual((await collect(client.vectorStores.fileBatches.listFiles(batch.id,{vector_store_id:stores[0].id,limit:1}))).sort(),expectedFiles);
     const search=await client.vectorStores.search(stores[0].id,{query:'deployment',max_num_results:1});
     assert.equal(search.data.length,1);assert.equal(search.hasNextPage(),false);
     const conversation=await client.conversations.create({items:[{role:'user',content:'first'},{role:'assistant',content:'second'},{role:'user',content:'third'}]});
@@ -151,7 +151,7 @@ test('最新版 Anthropic SDK 调用 Messages 的 JSON/SSE',async()=>{
     }
     const unauthorized=new Anthropic({apiKey:'wrong-key',baseURL:base,maxRetries:0});
     await assert.rejects(unauthorized.messages.create({model:'qwen-instruct',max_tokens:64,messages:[{role:'user',content:'你好'}]}),cause=>{
-      assert.equal(cause.status,401);assert.match(cause.request_id,/^req_[a-f0-9]+$/);return true;
+      assert.equal(cause.status,401);assert.match(cause.requestID,/^req_[a-f0-9]+$/);return true;
     });
   });
 });
