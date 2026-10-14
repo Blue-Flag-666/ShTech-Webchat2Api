@@ -41,6 +41,21 @@ jobs:
           exit "$status"
       - run: npm run test:sdk
         timeout-minutes: 5
+  opencode-compat:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26.11.1'
+          cache: npm
+      - run: npm install --global npm@12.2.0 --ignore-scripts
+      - run: npm ci --ignore-scripts
+      - run: npm install --global opencode-ai@1.19.0
+      - name: Check actual OpenCode tool loop without school requests
+        run: node scripts/verify-opencode.mjs
   image-test:
     needs: test
     runs-on: ubuntu-latest
@@ -135,7 +150,7 @@ jobs:
           path: dist/${{ matrix.artifact }}
           archive: false
   publish:
-    needs: image-test
+    needs: [image-test, opencode-compat]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
