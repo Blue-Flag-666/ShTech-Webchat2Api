@@ -84,13 +84,23 @@ export class TokenManager {
   }
   get configured() { return Boolean(this.token || (this.username && this.password)); }
   get renewable() { return Boolean(this.username && this.password); }
-  async get(force=false) {
+  async get(force=false,signal) {
+    if(signal?.aborted)throw new Error('请求已取消');
     let expires=Infinity;
     try { const payload=JSON.parse(Buffer.from(this.token.split('.')[1],'base64url')); if(Number.isFinite(payload.exp)) expires=payload.exp*1000; } catch {}
     if(!force && this.token && expires>Date.now()+60000) return this.token;
     if(!this.renewable) { if(this.token && !force && expires>Date.now()) return this.token; throw fail('登录 token 已失效，请更新 GENAI_TOKEN 或配置 CAS 账号'); }
-    if(this.pending) return this.pending;
-    this.pending=this.login(this.username,this.password).then(token=>{if(!token)throw fail('CAS 返回空 token');this.token=token;return token;});
-    try{return await this.pending;}finally{this.pending=undefined;}
+    if(!this.pending){
+      const pending=this.login(this.username,this.password).then(token=>{if(!token)throw fail('CAS 返回空 token');this.token=token;return token;});
+      this.pending=pending;
+      void pending.then(()=>{if(this.pending===pending)this.pending=undefined;},()=>{if(this.pending===pending)this.pending=undefined;});
+    }
+    if(!signal)return this.pending;
+    return new Promise((resolve,reject)=>{
+      const abort=()=>{signal.removeEventListener('abort',abort);reject(new Error('请求已取消'));};
+      signal.addEventListener('abort',abort,{once:true});
+      this.pending.then(value=>{signal.removeEventListener('abort',abort);resolve(value);},cause=>{signal.removeEventListener('abort',abort);reject(cause);});
+      if(signal.aborted)abort();
+    });
   }
 }

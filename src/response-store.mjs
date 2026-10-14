@@ -12,7 +12,7 @@ export class ResponseStore {
   }
   set(id,value){
     if(!this.maximum)return;
-    this.prune();this.entries.delete(id);this.entries.set(id,{expires:Date.now()+this.ttl,value:structuredClone(value)});this.prune();
+    this.prune();this.entries.set(id,{expires:Date.now()+this.ttl,value:structuredClone(value)});this.prune();
   }
   get(id){
     this.prune();const entry=this.entries.get(id);if(!entry)throw failure(404,`${this.label}不存在或已过期：${id}`);

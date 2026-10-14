@@ -179,10 +179,15 @@ export function parseStructured(content,policy) {
   if(!policy)return content;
   if(typeof content!=='string')throw failed('模型没有返回有效 JSON');
   const fenced=[...content.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(match=>match[1]);
-  let value;const candidates=[content,content.trim().replace(/^```(?:json)?\s*|\s*```$/gi,''),...fenced,...jsonValues(content)];
-  for(const candidate of candidates){try{value=parseModelJson(candidate);break;}catch{}}
-  if(value===undefined)throw failed('模型没有返回有效 JSON');
-  if(policy.type==='json_object' && (!value || typeof value!=='object' || Array.isArray(value)))throw failed('模型没有返回 JSON 对象');
-  validate(value,policy.schema,policy.schema);
-  return JSON.stringify(value);
+  const candidates=[content,content.trim().replace(/^```(?:json)?\s*|\s*```$/gi,''),...fenced,...jsonValues(content)];
+  let validationError;
+  for(const candidate of candidates){
+    let value;try{value=parseModelJson(candidate);}catch{continue;}
+    try{
+      if(policy.type==='json_object'&&(!value||typeof value!=='object'||Array.isArray(value)))throw failed('模型没有返回 JSON 对象');
+      validate(value,policy.schema,policy.schema);
+      return JSON.stringify(value);
+    }catch(cause){validationError??=cause;}
+  }
+  throw validationError??failed('模型没有返回有效 JSON');
 }

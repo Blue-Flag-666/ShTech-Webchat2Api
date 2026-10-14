@@ -106,8 +106,29 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build:cli
-      - uses: actions/upload-artifact@v7.0.1
+      - name: Smoke test Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $expected = (Get-Content package.json | ConvertFrom-Json).version
+          $actual = & ".\dist\${{ matrix.artifact }}" --version
+          if ($LASTEXITCODE -ne 0 -or $actual.Trim() -ne $expected) { throw "CLI version mismatch: $actual" }
+          $cliHelp = & ".\dist\${{ matrix.artifact }}" --help
+          if ($LASTEXITCODE -ne 0 -or ($cliHelp -join "`n") -notmatch 'ShTech Webchat API') { throw 'CLI help failed' }
+      - name: Smoke test Linux executable
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          expected=$(node -p "require('./package.json').version")
+          actual=$(./dist/${{ matrix.artifact }} --version)
+          test "$actual" = "$expected"
+          ./dist/${{ matrix.artifact }} --help | grep -q 'ShTech Webchat API'
+      - name: Check packaged API service without upstream requests
+        timeout-minutes: 10
+        run: node scripts/verify-cli-package.mjs dist/${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v7.0.2
         with:
+          name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
           archive: false
   publish:
@@ -144,7 +165,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
   release-cli:
-    needs: cli
+    needs: [cli, publish]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write

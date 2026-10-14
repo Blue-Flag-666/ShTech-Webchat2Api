@@ -29,10 +29,36 @@ test('Vector Stores 文件批次记录成功和失败项',async()=>{
   assert.equal(stores.cancelBatch(store.id,batch.id).status,'completed');
 });
 
+test('检索结果达到数量上限时不声称存在不可读取的下一页',async()=>{
+  const files=new FileStore(4,3600000,1024);
+  const sources=[0,1,2].map(index=>files.create({filename:`guide-${index}.txt`,mime:'text/plain',bytes:Buffer.from(`deployment guide ${index}`)}));
+  const stores=new VectorStore(files,{maximum:2,ttl:3600000,maxFiles:4});
+  const store=await stores.create({file_ids:sources.map(source=>source.id)});
+  const result=stores.search(store.id,{query:'deployment',max_num_results:1});
+  assert.equal(result.data.length,1);assert.equal(result.has_more,false);assert.equal(result.next_page,null);
+  assert.equal(stores.search(store.id,{query:'deployment',max_num_results:3}).data.length,3);
+});
+
+test('before 游标返回紧邻的上一页，不跳过中间记录',async()=>{
+  const stores=new VectorStore(new FileStore(1,3600000,1024),{maximum:8,ttl:3600000,maxFiles:1});
+  for(let i=0;i<5;i++)await stores.create({name:`store-${i}`});
+  const ordered=stores.list({order:'asc'}).data.map(item=>item.id);
+  const previous=stores.list({order:'asc',before:ordered[4],limit:2});
+  assert.deepEqual(previous.data.map(item=>item.id),ordered.slice(2,4));
+  assert.equal(previous.first_id,ordered[2]);assert.equal(previous.last_id,ordered[3]);assert.equal(previous.has_more,true);
+  const first=stores.list({order:'asc',before:previous.first_id,limit:2});
+  assert.deepEqual(first.data.map(item=>item.id),ordered.slice(0,2));assert.equal(first.has_more,false);
+});
+
 test('Responses file_search 校验工具并生成检索上下文和调用项',async()=>{
   const files=new FileStore(4,3600000,1024),source=files.create({filename:'api.md',mime:'text/markdown',bytes:Buffer.from('The retry limit is five attempts.')});
   const stores=new VectorStore(files,{maximum:2,ttl:3600000,maxFiles:4}),store=await stores.create({file_ids:[source.id]});
   const found=stores.responseSearch({input:'What is the retry limit?',tools:[{type:'file_search',vector_store_ids:[store.id],max_num_results:3}],include:['file_search_call.results']});
   assert.match(found.context,/five attempts/);assert.equal(found.item.type,'file_search_call');assert.equal(found.item.results[0].file_id,source.id);
+  assert.equal(stores.responseSearch({input:'retry limit',tools:[{type:'file_search',vector_store_ids:[store.id]}],tool_choice:'none'}),null);
+  assert.equal(stores.responseSearch({input:'retry limit',tools:[{type:'file_search',vector_store_ids:[store.id]}],tool_choice:{type:'web_search'}}),null);
+  assert.ok(stores.responseSearch({input:'retry limit',tools:[{type:'file_search',vector_store_ids:[store.id]}],tool_choice:{type:'file_search'}}));
+  assert.ok(stores.responseSearch({input:'retry limit',tools:[{type:'file_search',vector_store_ids:[store.id]}],tool_choice:{type:'allowed_tools',mode:'auto',tools:[{type:'file_search'}]}}));
+  assert.equal(stores.responseSearch({input:'retry limit',tools:[{type:'file_search',vector_store_ids:[store.id]}],tool_choice:{type:'allowed_tools',mode:'auto',tools:[{type:'web_search'}]}}),null);
   assert.throws(()=>stores.responseSearch({input:'x',tools:[{type:'file_search',vector_store_ids:['missing']}]}),/不存在/);
 });

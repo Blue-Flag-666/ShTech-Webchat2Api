@@ -1,28 +1,28 @@
 import { validateSchemaValue } from './structured.mjs';
 
-const invalid = message => Object.assign(new Error(message), { status: 400 });
+const invalid = (message,param) => Object.assign(new Error(message), { status: 400, ...(param ? {param} : {}) });
 const upstreamError = message => Object.assign(new Error(message), { status: 502 });
 export function toolPolicy(tools, choice = 'auto', parallel = true, maxCalls = 64) {
-  if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > 64) throw invalid('max_tool_calls 必须是 1–64 的整数');
+  if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > 64) throw invalid('max_tool_calls 必须是 1–64 的整数','max_tool_calls');
   if (tools === undefined) {
-    if (choice !== 'auto' && choice !== 'none') throw invalid('tool_choice 需要 tools');
+    if (choice !== 'auto' && choice !== 'none') throw invalid('tool_choice 需要 tools','tool_choice');
     return null;
   }
-  if (!Array.isArray(tools) || tools.length > 64) throw invalid('tools 必须为数组，最多 64 个');
+  if (!Array.isArray(tools) || tools.length > 64) throw invalid('tools 必须为数组，最多 64 个','tools');
   const names = new Set();
   for (const tool of tools) {
     const f = tool?.function;
-    if (tool?.type !== 'function' || typeof f?.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_-]{0,255}$/.test(f.name) || names.has(f.name)) throw invalid('工具必须具有唯一且有效的 function.name');
-    if (f.parameters !== undefined && (!f.parameters || typeof f.parameters !== 'object' || Array.isArray(f.parameters))) throw invalid('工具 parameters 必须是 JSON Schema 对象');
-    if(f.strict!==undefined&&typeof f.strict!=='boolean')throw invalid('工具 strict 必须是布尔值');
+    if (tool?.type !== 'function' || typeof f?.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_-]{0,255}$/.test(f.name) || names.has(f.name)) throw invalid('工具必须具有唯一且有效的 function.name','tools');
+    if (f.parameters !== undefined && (!f.parameters || typeof f.parameters !== 'object' || Array.isArray(f.parameters))) throw invalid('工具 parameters 必须是 JSON Schema 对象','tools');
+    if(f.strict!==undefined&&typeof f.strict!=='boolean')throw invalid('工具 strict 必须是布尔值','tools');
     names.add(f.name);
   }
   let required = choice === 'required', allowed = names;
   if (choice && typeof choice === 'object') {
-    if (choice.type !== 'function' || !names.has(choice.function?.name)) throw invalid('tool_choice 指定了未知工具');
+    if (choice.type !== 'function' || !names.has(choice.function?.name)) throw invalid('tool_choice 指定了未知工具','tool_choice');
     allowed = new Set([choice.function.name]); required = true;
-  } else if (!['auto','none','required'].includes(choice)) throw invalid('无效 tool_choice');
-  if (required && !names.size) throw invalid('required 至少需要一个工具');
+  } else if (!['auto','none','required'].includes(choice)) throw invalid('无效 tool_choice','tool_choice');
+  if (required && !names.size) throw invalid('required 至少需要一个工具','tools');
   if (choice === 'none' || !names.size) return null;
   return { tools: tools.filter(t=>allowed.has(t.function.name)), allowed, required,parallel:parallel!==false,maxCalls:parallel===false?1:maxCalls,
     custom:new Set(tools.filter(t=>t.custom&&allowed.has(t.function.name)).map(t=>t.function.name)) };
@@ -59,7 +59,7 @@ function addToolCall(parsed,policy,makeId,calls) {
   if(!args||typeof args!=='object'||Array.isArray(args))throw upstreamError('模型输出了无效工具参数');
   if(policy.custom?.has(value.name)&&typeof args.input!=='string')throw upstreamError('模型输出了无效的 custom 工具文本参数');
   const declaration=policy.tools.find(tool=>tool.function.name===value.name);
-  if(declaration?.function?.parameters&&declaration.function.strict!==false)try{validateSchemaValue(args,declaration.function.parameters);}catch{throw upstreamError(`模型输出的工具参数不符合 ${value.name} 的 JSON Schema`);}
+  if(declaration?.function?.parameters&&declaration.function.strict!==false)try{validateSchemaValue(args,declaration.function.parameters);}catch(cause){throw upstreamError(`模型输出的工具参数不符合 ${value.name} 的 JSON Schema：${cause.message}`);}
   const suppliedId=typeof value.id==='string'&&value.id;
   let callId=suppliedId?value.id:makeId();
   if(calls.some(call=>call.id===callId)){
@@ -72,16 +72,64 @@ function addToolCall(parsed,policy,makeId,calls) {
   return true;
 }
 const toolValues=parsed=>Array.isArray(parsed)?parsed:Array.isArray(parsed?.tool_calls)?parsed.tool_calls:[parsed];
+function jsonFence(source,from){
+  const opening=/```(?:json)?[ \t]*\r?\n/gi;opening.lastIndex=from;
+  const match=opening.exec(source);if(!match)return null;
+  let quoted=false,escaped=false;
+  for(let index=opening.lastIndex;index<source.length;index++){
+    const character=source[index];
+    if(quoted){
+      if(escaped)escaped=false;
+      else if(character==='\\')escaped=true;
+      else if(character==='"')quoted=false;
+    }else if(character==='"')quoted=true;
+    else if(source.startsWith('```',index)){
+      const end=index+3;
+      return{index:match.index,end,body:source.slice(opening.lastIndex,index).replace(/\r?\n$/,'')};
+    }
+  }
+  return{index:match.index,incomplete:true};
+}
+function closingTag(source,state,tag){
+  const closing=new RegExp(`^<\\s*\\/\\s*${tag}\\s*>`,'i');
+  for(let index=state.scanAt;index<source.length;index++){
+    const character=source[index];
+    if(state.quoted){
+      if(state.escaped)state.escaped=false;
+      else if(character==='\\')state.escaped=true;
+      else if(character==='"')state.quoted=false;
+    }else if(character==='"')state.quoted=true;
+    else if(character==='<'){
+      const match=closing.exec(source.slice(index));
+      if(match)return{index,end:index+match[0].length};
+      state.scanAt=index;return null;
+    }
+  }
+  state.scanAt=source.length;return null;
+}
+function taggedText(source,onBlock){
+  const opening=/<\s*(api_tool_call|tool_call)\s*>/gi;
+  let cursor=0,content='';
+  while(true){
+    opening.lastIndex=cursor;
+    const match=opening.exec(source);if(!match)break;
+    const close=closingTag(source,{scanAt:opening.lastIndex,quoted:false,escaped:false},match[1]);
+    if(!close)break;
+    content+=source.slice(cursor,match.index);
+    onBlock?.(source.slice(opening.lastIndex,close.index));
+    cursor=close.end;
+  }
+  return content+source.slice(cursor);
+}
 export function parseToolCalls(text, policy, makeId) {
   if (!policy) return { content: text, tool_calls: [] };
   const calls = [];
   const add=parsed=>addToolCall(parsed,policy,makeId,calls);
-  const content = text.replace(/<\s*(api_tool_call|tool_call)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi, (_,tag,raw)=>{
+  const content = taggedText(text,raw=>{
     let parsed;
     try { parsed=parseModelJson(raw); } catch { throw upstreamError('模型输出了无法解析的工具调用'); }
     const values=toolValues(parsed);
     if(!values.length||values.some(value=>!add(value)))throw upstreamError('模型输出了不允许的工具');
-    return '';
   }).trim();
   if (/<\s*\/?\s*(?:api_tool_call|tool_call)\b/i.test(content)) throw upstreamError('工具调用块未完整结束');
   let remaining=content;
@@ -98,9 +146,25 @@ export function parseToolCalls(text, policy, makeId) {
   return { content: remaining || null, tool_calls: calls };
 }
 export function createToolCallStream(policy,makeId) {
-  let source='',scanFrom=0,pending=null;
-  const calls=[];
-  const pattern=()=>/<\s*(api_tool_call|tool_call)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi;
+  let source='',scanFrom=0,textCursor=0,pending=null,readyText='',emittedText='',jsonToolEnd=null,plainJson=false;
+  const calls=[],hiddenFences=[];
+  const jsonCandidate=()=>{
+    const value=source.replace(/^[\s\uFEFF]*/,'');
+    return value.startsWith('{')||/^\[\s*(?:\{|$)/.test(value)||/^```(?:json\b|\s*$)/i.test(value);
+  };
+  const safeTextEnd=()=>{
+    const names=['<api_tool_call>','<tool_call>'];
+    let end=source.length;
+    for(let index=source.lastIndexOf('<');index>=textCursor;index=source.lastIndexOf('<',index-1)){
+      const suffix=source.slice(index).replace(/\s/g,'').toLowerCase();
+      if(names.some(name=>name.startsWith(suffix)||suffix.startsWith(name.slice(0,-1))))end=index;
+    }
+    for(let index=source.lastIndexOf('`');index>=textCursor;index=source.lastIndexOf('`',index-1)){
+      const suffix=source.slice(index).toLowerCase();
+      if('```json'.startsWith(suffix)||/^```(?:json\b|\s)/.test(suffix))end=Math.min(end,index);
+    }
+    return end;
+  };
   return {
     push(value) {
       if(!value)return [];
@@ -110,27 +174,70 @@ export function createToolCallStream(policy,makeId) {
         if(!pending) {
           const opening=/<\s*(api_tool_call|tool_call)\s*>/gi;opening.lastIndex=scanFrom;
           const match=opening.exec(source);
-          if(!match){scanFrom=Math.max(scanFrom,source.length-32);break;}
-          pending={tag:match[1].toLowerCase(),bodyStart:opening.lastIndex};
+          const fenced=jsonFence(source,scanFrom);
+          if(fenced&&(!match||fenced.index<match.index)){
+            if(fenced.incomplete){
+              if(fenced.index>textCursor){readyText+=source.slice(textCursor,fenced.index);textCursor=fenced.index;}
+              scanFrom=fenced.index;break;
+            }
+            let parsed;try{parsed=parseModelJson(fenced.body);}catch{}
+            const values=parsed===undefined?[]:toolValues(parsed);
+            if(values.length&&values.every(item=>policy.allowed.has(item?.name||item?.function?.name))){
+              if(fenced.index>textCursor)readyText+=source.slice(textCursor,fenced.index);
+              const before=calls.length;
+              for(const item of values)addToolCall(item,policy,makeId,calls);
+              added.push(...calls.slice(before));
+              hiddenFences.push({start:fenced.index,end:fenced.end});
+              scanFrom=textCursor=fenced.end;
+              continue;
+            }
+            if(!policy.required){
+              readyText+=source.slice(textCursor,fenced.end);
+              scanFrom=textCursor=fenced.end;
+              continue;
+            }
+          }
+          if(!match){
+            if(!calls.length&&!plainJson&&jsonCandidate()){
+              let parsed,complete=false;try{parsed=parseModelJson(source);complete=true;}catch{}
+              const values=parsed===undefined?[]:toolValues(parsed);
+              if(values.length&&values.every(item=>policy.allowed.has(item?.name||item?.function?.name))){
+                const before=calls.length;
+                for(const item of values)addToolCall(item,policy,makeId,calls);
+                added.push(...calls.slice(before));
+                jsonToolEnd=source.length;scanFrom=textCursor=jsonToolEnd;
+                break;
+              }
+              if(complete&&!policy.required)plainJson=true;
+            }
+            const end=safeTextEnd();
+            if((jsonToolEnd!==null||plainJson||!jsonCandidate())&&end>textCursor){readyText+=source.slice(textCursor,end);textCursor=end;}
+            scanFrom=end;break;
+          }
+          if(match.index>textCursor){readyText+=source.slice(textCursor,match.index);textCursor=match.index;}
+          pending={tag:match[1].toLowerCase(),bodyStart:opening.lastIndex,scanAt:opening.lastIndex,quoted:false,escaped:false};
         }
-        const closing=/<\s*\/\s*(api_tool_call|tool_call)\s*>/gi;closing.lastIndex=pending.bodyStart;
-        let close;
-        while((close=closing.exec(source))&&close[1].toLowerCase()!==pending.tag){}
+        const close=closingTag(source,pending,pending.tag);
         if(!close)break;
         let parsed;try{parsed=parseModelJson(source.slice(pending.bodyStart,close.index));}catch{throw upstreamError('模型输出了无法解析的工具调用');}
         const values=toolValues(parsed),before=calls.length;
         if(!values.length||values.some(item=>!addToolCall(item,policy,makeId,calls)))throw upstreamError('模型输出了不允许的工具');
         added.push(...calls.slice(before));
-        scanFrom=closing.lastIndex;pending=null;
+        scanFrom=close.end;textCursor=close.end;pending=null;
       }
       return added;
     },
+    takeText() {const value=readyText;readyText='';emittedText+=value;return value;},
     finish() {
-      if(!calls.length)return parseToolCalls(source,policy,makeId);
-      const content=source.replace(pattern(),'').trim();
+      const parsed=!calls.length?parseToolCalls(source,policy,makeId):null;
+      let withoutFences=source;
+      if(hiddenFences.length){let cursor=0;const fragments=[];for(const fence of hiddenFences){fragments.push(source.slice(cursor,fence.start));cursor=fence.end;}fragments.push(source.slice(cursor));withoutFences=fragments.join('');}
+      const content=hiddenFences.length?taggedText(withoutFences):jsonToolEnd!==null?taggedText(source.slice(jsonToolEnd)):calls.length?taggedText(source):parsed.tool_calls.length?emittedText+readyText:source;
       if (/<\s*\/?\s*(?:api_tool_call|tool_call)\b/i.test(content)) throw upstreamError('工具调用块未完整结束');
-      if(policy.required&&!calls.length)throw upstreamError('模型未遵循 required 工具调用约束');
-      return {content:content||null,tool_calls:calls};
+      if(policy.required&&!(calls.length||parsed?.tool_calls.length))throw upstreamError('模型未遵循 required 工具调用约束');
+      const committed=emittedText+readyText;
+      if(content.startsWith(committed))readyText+=content.slice(committed.length);
+      return {content:content||null,tool_calls:calls.length?calls:parsed.tool_calls};
     }
   };
 }

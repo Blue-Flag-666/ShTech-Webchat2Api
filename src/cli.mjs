@@ -6,6 +6,8 @@ import { isSea } from 'node:sea';
 import { Writable } from 'node:stream';
 import { createInterface } from 'node:readline/promises';
 import { configuration, startServer } from './server.mjs';
+import { opencodeConfig, opencodeV2Config } from './opencode.mjs';
+import { envValue, inspectionTimeout } from './cli-config.mjs';
 
 const VERSION = '0.15.2';
 const sea = isSea();
@@ -17,7 +19,7 @@ function usage() {
 用法:
   shtech-webchat2api [start] [--config <文件>]
   shtech-webchat2api init [--config <文件>] [--force]
-  shtech-webchat2api status|models|doctor [--config <文件>]
+  shtech-webchat2api status|models|doctor|opencode|opencode-v2 [--config <文件>]
   shtech-webchat2api --help
 
 直接运行时默认读取可执行文件旁的 .env；若文件不存在，会进入首次配置。`);
@@ -27,7 +29,7 @@ function argumentsOf(argv) {
   const result = { command: 'start', config: defaultConfig, force: false };
   for (let i = 0; i < argv.length; i++) {
     const value = argv[i];
-    if (['start','init','status','models','doctor'].includes(value) && i === 0) result.command = value;
+    if (['start','init','status','models','doctor','opencode','opencode-v2'].includes(value) && i === 0) result.command = value;
     else if (value === '--config') {
       if (!argv[i + 1]) throw new Error('--config 后需要文件路径');
       result.config = resolve(argv[++i]);
@@ -57,13 +59,8 @@ async function hidden(rl, question) {
     else if (/\r|\n/.test(value)) process.stdout.write(value);
     else process.stdout.write('*');
   };
-  try { return (await rl.question(`${question}: `)).trim(); }
+  try { return await rl.question(`${question}: `); }
   finally { rl._writeToOutput = original; }
-}
-
-function envValue(value) {
-  if (/^[A-Za-z0-9_./:@+\-]*$/.test(value)) return value;
-  return JSON.stringify(value);
 }
 
 async function configure(path, force = false) {
@@ -119,19 +116,29 @@ async function main() {
 }
 
 async function inspect(command,path) {
-  const config=configuration(),host=['0.0.0.0','::1','localhost'].includes(config.host)?'127.0.0.1':config.host;
-  const base=`http://${host}:${config.port}`,headers={Authorization:`Bearer ${config.key}`},signal=AbortSignal.timeout(5000);
+  const config=configuration(),host=config.host==='0.0.0.0'?'127.0.0.1':config.host==='::'?'[::1]':config.host==='::1'?'[::1]':config.host==='localhost'?'127.0.0.1':config.host.includes(':')?`[${config.host}]`:config.host;
+  const base=`http://${host}:${config.port}`,headers={Authorization:`Bearer ${config.key}`},signal=AbortSignal.timeout(inspectionTimeout(command,config.timeout));
   if(command==='doctor'){
     console.log(`版本: ${VERSION}  平台: ${process.platform}-${process.arch}`);
     console.log(`配置: ${path}`);
     console.log(`登录: ${config.username?'CAS 自动刷新':config.token?'静态 Token':'未配置'}`);
     console.log(`图片: ${config.uploadToken?'使用配置的上传 Token':'自动读取网页上传凭据'}`);
   }
-  const endpoint=command==='models'?'/v1/models':'/health';
-  let response;try{response=await fetch(base+endpoint,{headers,signal});}catch{throw new Error(`无法连接 ${base}，请先启动服务`);}
-  if(!response.ok)throw new Error(`本地服务返回 HTTP ${response.status}`);
-  const value=await response.json();
+  const endpoint=['models','opencode','opencode-v2'].includes(command)?'/v1/models':command==='doctor'?'/health?upstream=1':'/health';
+  let response;try{response=await fetch(base+endpoint,{headers,signal});}catch{
+    if(signal.aborted)throw new Error(`等待 ${base} 响应超时，请检查 CAS 登录或学校模型目录`);
+    throw new Error(`无法连接 ${base}，请先启动服务`);
+  }
+  const value=await response.json().catch(()=>null);
+  if(signal.aborted)throw new Error(`等待 ${base} 响应超时，请检查 CAS 登录或学校模型目录`);
+  if(!response.ok){
+    if(command==='doctor'&&value)console.log(JSON.stringify(value,null,2));
+    throw new Error(value?.error?.message||(value?.upstream_status==='unavailable'?'学校模型目录不可用，请检查 CAS 登录或网站连接':`本地服务返回 HTTP ${response.status}`));
+  }
+  if(!value)throw new Error('本地服务返回了无效 JSON');
   if(command==='models')for(const model of value.data||[])console.log(`${model.id}\t${JSON.stringify(model.capabilities||{})}`);
+  else if(command==='opencode')console.log(JSON.stringify(opencodeConfig(value.data,`${base}/v1`,config.key),null,2));
+  else if(command==='opencode-v2')console.log(JSON.stringify(opencodeV2Config(value.data,`${base}/v1`,config.key),null,2));
   else console.log(JSON.stringify(value,null,2));
 }
 

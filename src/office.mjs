@@ -7,26 +7,26 @@ const decoder=new TextDecoder('utf-8',{fatal:true});
 
 function fail(message){throw Object.assign(new Error(message),{status:400});}
 
-function inspectZip(bytes){
+function inspectZip(bytes,label='Office'){
   const buffer=Buffer.from(bytes),start=Math.max(0,buffer.length-65557);let eocd=-1;
   for(let i=buffer.length-22;i>=start;i--)if(buffer.readUInt32LE(i)===0x06054b50){eocd=i;break;}
-  if(eocd<0)fail('Office 文件不是有效的 ZIP 文档');
+  if(eocd<0)fail(`${label} 文件不是有效的 ZIP 文档`);
   const entries=buffer.readUInt16LE(eocd+10),size=buffer.readUInt32LE(eocd+12),offset=buffer.readUInt32LE(eocd+16);
-  if(entries===0xffff||size===0xffffffff||offset===0xffffffff)fail('暂不支持 ZIP64 Office 文件');
-  if(entries<1||entries>MAX_ENTRIES||offset+size>buffer.length)fail('Office 文件目录无效或文件数量过多');
+  if(entries===0xffff||size===0xffffffff||offset===0xffffffff)fail(`暂不支持 ZIP64 ${label} 文件`);
+  if(entries<1||entries>MAX_ENTRIES||offset+size>buffer.length)fail(`${label} 文件目录无效或文件数量过多`);
   let cursor=offset,total=0;
   for(let index=0;index<entries;index++){
-    if(cursor+46>buffer.length||buffer.readUInt32LE(cursor)!==0x02014b50)fail('Office 文件目录损坏');
+    if(cursor+46>buffer.length||buffer.readUInt32LE(cursor)!==0x02014b50)fail(`${label} 文件目录损坏`);
     const flags=buffer.readUInt16LE(cursor+8),uncompressed=buffer.readUInt32LE(cursor+24);
-    if(flags&1)fail('不支持加密的 Office 文件');
-    total+=uncompressed;if(total>MAX_UNCOMPRESSED_BYTES)fail('Office 文件解压后不能超过 32 MiB');
+    if(flags&1)fail(`不支持加密的 ${label} 文件`);
+    total+=uncompressed;if(total>MAX_UNCOMPRESSED_BYTES)fail(`${label} 文件解压后不能超过 32 MiB`);
     cursor+=46+buffer.readUInt16LE(cursor+28)+buffer.readUInt16LE(cursor+30)+buffer.readUInt16LE(cursor+32);
   }
 }
 
-function archive(bytes){
-  inspectZip(bytes);
-  try{return unzipSync(Uint8Array.from(bytes));}catch{fail('无法解压 Office 文件');}
+function archive(bytes,label='Office'){
+  inspectZip(bytes,label);
+  try{return unzipSync(Uint8Array.from(bytes));}catch{fail(`无法解压 ${label} 文件`);}
 }
 
 function entity(value){

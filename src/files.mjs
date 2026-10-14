@@ -2,9 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import { extractOfficeText } from './office.mjs';
 import { extractDocumentText } from './documents.mjs';
+import { extractRepositoryArchive } from './repository-archives.mjs';
+import { extractNotebookText } from './notebooks.mjs';
+import { extractDiffText, extractLogText } from './code-artifacts.mjs';
+import { extractRtfText, extractLegacyDocText } from './legacy-documents.mjs';
 
 const failure=(status,message)=>Object.assign(new Error(message),{status});
-const TEXT_EXTENSIONS=new Set(['.txt','.md','.markdown','.json','.jsonl','.csv','.tsv','.xml','.html','.htm','.css','.scss','.less','.js','.mjs','.cjs','.jsx','.ts','.tsx','.py','.java','.c','.h','.cc','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.sh','.bash','.zsh','.fish','.ps1','.yaml','.yml','.toml','.ini','.conf','.cfg','.env','.sql','.graphql','.gql','.log','.diff','.patch','.vue','.svelte','.tex','.rst']);
+const TEXT_EXTENSIONS=new Set(['.txt','.md','.markdown','.json','.jsonl','.csv','.tsv','.xml','.html','.htm','.css','.scss','.less','.js','.mjs','.cjs','.jsx','.ts','.tsx','.py','.java','.c','.h','.cc','.cpp','.hpp','.cs','.go','.rs','.rb','.php','.sh','.bash','.zsh','.fish','.ps1','.yaml','.yml','.toml','.ini','.conf','.cfg','.env','.sql','.graphql','.gql','.log','.diff','.patch','.vue','.svelte','.tex','.bib','.sty','.cls','.rst']);
 const FILE_PURPOSES=new Set(['assistants','batch','fine-tune','vision','user_data','evals']);
 const INTERNAL_FILE_PURPOSES=new Set(['assistants_output','batch_output','fine-tune-results']);
 const OFFICE_TYPES=new Map([
@@ -46,8 +50,15 @@ export async function extractFileText(file,maxPages=200){
   if(mime==='application/pdf'||extension==='.pdf')return pdfText(file,maxPages);
   const office=OFFICE_TYPES.get(mime)||OFFICE_TYPES.get(extension);if(office)return extractOfficeText(file,office);
   const document=DOCUMENT_TYPES.get(mime)||DOCUMENT_TYPES.get(extension);if(document)return extractDocumentText(file,document);
+  if(extension==='.rtf'||['application/rtf','application/x-rtf','text/rtf'].includes(mime))return{text:extractRtfText(file.bytes),mime:'application/rtf'};
+  if(extension==='.doc'||mime==='application/msword')return{text:extractLegacyDocText(file.bytes),mime:'text/plain'};
+  const archive=extension==='.zip'||mime==='application/zip'?'zip':extension==='.tar'||mime==='application/x-tar'?'tar':/\.(?:tar\.gz|tgz)$/i.test(file.filename)||['application/gzip','application/x-gzip'].includes(mime)?'tgz':null;
+  if(archive)return extractRepositoryArchive(file,archive);
+  if(extension==='.ipynb'||mime==='application/x-ipynb+json')return{text:extractNotebookText(file.bytes),mime:'application/x-ipynb+json'};
   if(!(mime.startsWith('text/')||['application/json','application/jsonl','application/xml','application/yaml','application/x-yaml','application/toml','application/javascript'].includes(mime)||TEXT_EXTENSIONS.has(extension)))throw failure(400,`暂不支持读取文件类型：${mime||extension||'unknown'}`);
   let value;try{value=new TextDecoder('utf-8',{fatal:true}).decode(file.bytes);}catch{throw failure(400,`文件 ${file.filename} 不是有效 UTF-8 文本`);}
+  if(extension==='.diff'||extension==='.patch')value=extractDiffText(value);
+  if(extension==='.log')value=extractLogText(value);
   return {text:value,mime:mime||'text/plain'};
 }
 
@@ -95,8 +106,19 @@ export class FileStore {
 }
 
 export async function readRawBody(req,limit){
+  const tooLarge=()=>Object.assign(failure(413,`请求不能超过 ${Math.floor(limit/1048576)} MiB`),{param:'body'});
+  const declared=req.headers?.['content-length'];
+  if(typeof declared==='string'&&/^\d+$/.test(declared)&&Number(declared)>limit)
+    throw tooLarge();
   let size=0;const parts=[];
-  for await(const chunk of req){size+=chunk.length;if(size>limit)throw failure(413,`请求不能超过 ${Math.floor(limit/1048576)} MiB`);parts.push(chunk);}
+  try{
+    for await(const chunk of req){size+=chunk.length;if(size>limit)throw tooLarge();parts.push(chunk);}
+  }catch(cause){
+    if(cause.status)throw cause;
+    if(req.aborted||req.complete===false)throw failure(499,'客户端已断开');
+    throw cause;
+  }
+  if(req.complete===false)throw failure(499,'客户端已断开');
   return Buffer.concat(parts);
 }
 
@@ -146,14 +168,20 @@ function storedImage(fileId,store){
   return `data:${file.mime};base64,${file.bytes.toString('base64')}`;
 }
 
-export async function expandInputFiles(path,input,store,{pdfMaxPages=200}={}){
+export async function prepareInputFiles(path,input,store,{pdfMaxPages=200,native=false}={}){
   if(!Number.isInteger(pdfMaxPages)||pdfMaxPages<1)throw new Error('PDF 页数上限必须为正整数');
-  const value=structuredClone(input);let totalBytes=0;
-  const inputFile=part=>{const file=inlineFile(part,store);totalBytes+=file.bytes.length;if(totalBytes>=store.maxBytes)throw failure(413,`输入文件总大小必须小于 ${Math.ceil(store.maxBytes/1048576)} MiB`);return file;};
+  const value=structuredClone(input),files=[];let totalBytes=0;
+  const inputFile=part=>{const file=inlineFile(part,store);totalBytes+=file.bytes.length;const limit=native?Math.min(store.maxBytes,10*1024*1024):store.maxBytes;if(totalBytes>=limit)throw failure(413,`输入文件总大小必须小于 ${Math.ceil(limit/1048576)} MiB`);return file;};
+  const fileContent=async part=>{
+    const file=inputFile(part);
+    if(!native)return {type:'input_text',text:await textFile(file,pdfMaxPages)};
+    files.push(file);
+    return {type:'input_text',text:`[Attached file: ${file.filename}]`};
+  };
   const convert=async content=>{
     if(!Array.isArray(content))return content;
     return Promise.all(content.map(async part=>{
-      if(part?.type==='input_file')return{type:'input_text',text:await textFile(inputFile(part),pdfMaxPages)};
+      if(part?.type==='input_file')return fileContent(part);
       if(part?.type==='input_image'&&part.file_id!==undefined)return{...part,file_id:undefined,image_url:storedImage(part.file_id,store)};
       return part;
     }));
@@ -162,9 +190,40 @@ export async function expandInputFiles(path,input,store,{pdfMaxPages=200}={}){
     if(item&&(!item.type||item.type==='message'))item.content=await convert(item.content);
     else if(['function_call_output','custom_tool_call_output'].includes(item?.type))item.output=await convert(item.output);
     else if(item?.type==='computer_call_output'&&item.output?.type==='computer_screenshot'&&item.output.file_id!==undefined)item.output={...item.output,file_id:undefined,image_url:storedImage(item.output.file_id,store)};
+    else if(['local_shell_call_output','apply_patch_call_output','program_output'].includes(item?.type)){
+      const field=item.type==='program_output'?'result':'output';item[field]=await convert(item[field]);
+    }
   }
   if(path==='/v1/chat/completions'&&Array.isArray(value.messages))for(const message of value.messages)if(Array.isArray(message.content))message.content=await Promise.all(message.content.map(async part=>{
-    if(part?.type!=='file')return part;const file=part.file;if(!file||typeof file!=='object')throw failure(400,'file 内容块无效');return{type:'text',text:await textFile(inputFile({file_id:file.file_id,file_data:file.file_data,filename:file.filename}),pdfMaxPages)};
+    if(part?.type!=='file')return part;const file=part.file;if(!file||typeof file!=='object')throw failure(400,'file 内容块无效');const converted=await fileContent({file_id:file.file_id,file_data:file.file_data,filename:file.filename});return{type:'text',text:converted.text};
   }));
-  return value;
+  if(path==='/v1/messages'&&Array.isArray(value.messages)){
+    const document=async block=>{
+      const source=block.source;
+      if(!source||typeof source!=='object'||Array.isArray(source))throw failure(400,'document.source 必须是对象');
+      for(const key of ['title','context'])if(block[key]!=null&&typeof block[key]!=='string')throw failure(400,`document.${key} 必须是字符串`);
+      if(block.citations!=null&&(!block.citations||typeof block.citations!=='object'||Array.isArray(block.citations)||block.citations.enabled!==undefined&&block.citations.enabled!==false))throw failure(400,'document 原生 citations 尚未支持');
+      let part;
+      if(source.type==='file')part={file_id:source.file_id};
+      else if(source.type==='text'&&source.media_type==='text/plain'&&typeof source.data==='string')part={filename:'document.txt',file_data:`data:text/plain;base64,${Buffer.from(source.data).toString('base64')}`};
+      else if(source.type==='base64'&&source.media_type==='application/pdf'&&typeof source.data==='string')part={filename:'document.pdf',file_data:`data:application/pdf;base64,${source.data}`};
+      else throw failure(400,'document.source 仅支持 text/plain 文本、Base64 PDF 或本地 file_id');
+      const converted=await fileContent(part);
+      const description=[block.title?`Document title: ${block.title}`:'',block.context?`Document context: ${block.context}`:'',converted.text].filter(Boolean).join('\n');
+      return{type:'text',text:description};
+    };
+    const blocks=async(content,depth=0)=>{
+      if(depth>1)throw failure(400,'tool_result 内容块不能继续嵌套 tool_result');
+      if(!Array.isArray(content))return content;
+      return Promise.all(content.map(async block=>{
+        if(block?.type==='document')return document(block);
+        if(block?.type==='tool_result')return{...block,content:await blocks(block.content,depth+1)};
+        return block;
+      }));
+    };
+    for(const message of value.messages)message.content=await blocks(message.content);
+  }
+  return {input:value,files};
 }
+
+export async function expandInputFiles(path,input,store,options){return (await prepareInputFiles(path,input,store,options)).input;}

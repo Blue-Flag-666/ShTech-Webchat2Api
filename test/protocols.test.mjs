@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, events } from '../src/server.mjs';
-import { normalizeRequest } from '../src/protocols.mjs';
+import { normalizeRequest, ProtocolOutput } from '../src/protocols.mjs';
 import { listenForFetch, confirmedModels } from './fixtures.mjs';
 
 async function fixture(fn, answer='你好', finish='stop') {
@@ -17,6 +17,32 @@ async function fixture(fn, answer='你好', finish='stop') {
   try {await fn(call,`http://127.0.0.1:${server.address().port}`);}finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
 }
 const requests=[['/v1/responses',{input:'你好',store:false}],['/v1/messages',{messages:[{role:'user',content:'你好'}],max_tokens:64}]];
+test('Responses 与 Anthropic 400 错误标明具体参数',async()=>{
+  await fixture(async call=>{
+    for(const [path,body,param] of [
+      ['/v1/responses',{input:42},'input'],
+      ['/v1/responses',{input:'你好',reasoning:{effort:'invalid'}},'reasoning.effort'],
+      ['/v1/responses',{input:'你好',background:'yes'},'background'],
+      ['/v1/messages',{max_tokens:0,messages:[{role:'user',content:'你好'}]},'max_tokens'],
+      ['/v1/messages',{max_tokens:64,messages:[{role:'tool',content:'你好'}]},'messages[0].role'],
+      ['/v1/messages',{max_tokens:64,messages:[{role:'user',content:'你好'}],tool_choice:{type:'invalid'}},'tool_choice']
+    ]){
+      const response=await call(path,{model:'qwen-instruct',...body});
+      assert.equal(response.status,400,`${path} ${param}`);
+      assert.equal((await response.json()).error.param,param,`${path} ${param}`);
+    }
+  });
+});
+test('Anthropic 混合工具结果保留文本段落和错误状态',()=>{
+  const value=normalizeRequest('/v1/messages',{model:'qwen-instruct',max_tokens:64,messages:[
+    {role:'assistant',content:[{type:'tool_use',id:'tool_1',name:'shell',input:{command:'pwd'}}]},
+    {role:'user',content:[{type:'text',text:'检查输出'},{type:'tool_result',tool_use_id:'tool_1',is_error:true,content:[{type:'text',text:'exit 1'},{type:'text',text:'permission denied'}]},{type:'text',text:'换个目录重试'}]}
+  ]});
+  assert.equal(value.messages[1].role,'tool');
+  assert.equal(value.messages[1].content,'Tool error: exit 1\npermission denied');
+  assert.equal(value.messages[2].content,'检查输出\n换个目录重试');
+  assert.throws(()=>normalizeRequest('/v1/messages',{max_tokens:64,messages:[{role:'user',content:[{type:'tool_result',tool_use_id:'tool_1',is_error:'false',content:'x'}]}]}),/is_error/);
+});
 test('两个协议非流式返回结构、鉴权和上游 usage',async()=>{
   await fixture(async call=>{
     for(const [path,body] of requests){
@@ -102,7 +128,7 @@ test('Responses custom 与 namespace 工具支持自由文本、流事件和历�
 test('Responses 可回放 OpenCode shell、补丁、程序和电脑工具历史',()=>{
   const input=[
     {type:'local_shell_call',call_id:'call_shell',action:{command:['git','status']}},
-    {type:'local_shell_call_output',call_id:'call_shell',output:'clean'},
+    {type:'local_shell_call_output',id:'call_shell',output:'clean'},
     {type:'apply_patch_call',call_id:'call_patch',operation:{type:'update_file',path:'a.js',diff:'@@'}},
     {type:'apply_patch_call_output',call_id:'call_patch',status:'completed',output:'Done'},
     {type:'program',id:'prog_1',call_id:'call_program',code:'return 1',fingerprint:'fp'},
@@ -117,13 +143,139 @@ test('Responses 可回放 OpenCode shell、补丁、程序和电脑工具历史'
   assert.equal(value.messages.filter(message=>message.tool_calls).length,4);
   assert.equal(value.messages.find(message=>message.tool_calls?.[0].id==='call_patch').tool_calls[0].function.name,'__openai_apply_patch');
   assert.equal(value.messages.find(message=>message.tool_call_id==='call_program').content,'1');
+  assert.equal(value.messages.find(message=>message.tool_call_id==='call_shell').content,'clean');
   assert.match(value.messages.find(message=>message.role==='system').content,/high/);
   assert.equal(value.messages.at(-1).content,'继续');
+});
+test('Responses shell 输出回放保留 stdout、stderr、退出状态和额外字段',()=>{
+  const input=[
+    {type:'shell_call',call_id:'call_test',action:{commands:['npm test']}},
+    {type:'shell_call_output',call_id:'call_test',status:'incomplete',output:[{stdout:'running tests',stderr:'ERROR: failed',outcome:{type:'exit',exit_code:1},source:'runner'}]}
+  ];
+  const value=normalizeRequest('/v1/responses',{input});
+  const result=value.messages.at(-1).content;
+  for(const detail of ['Tool incomplete:','stdout:\nrunning tests','stderr:\nERROR: failed','Exit code: 1','"source":"runner"'])assert.ok(result.includes(detail));
+});
+test('Responses local shell 结构化结果便于模型读取失败原因',()=>{
+  const input=[
+    {type:'local_shell_call',call_id:'call_test',action:{command:['npm','test']}},
+    {type:'local_shell_call_output',call_id:'call_test',status:'failed',output:{stdout:'running tests',stderr:'ERROR: failed',outcome:{type:'exit',exit_code:1},duration_ms:1200}}
+  ];
+  const result=normalizeRequest('/v1/responses',{input}).messages.at(-1).content;
+  for(const detail of ['Tool failed:','stdout:\nrunning tests','stderr:\nERROR: failed','Exit code: 1','"duration_ms":1200'])assert.ok(result.includes(detail));
+  const json={...input[1],output:JSON.stringify({stdout:'running tests',stderr:'ERROR: failed',exit_code:1,duration_ms:1200})};
+  const fromJson=normalizeRequest('/v1/responses',{input:[input[0],json]}).messages.at(-1).content;
+  for(const detail of ['stdout:\nrunning tests','stderr:\nERROR: failed','Exit code: 1','"duration_ms":1200'])assert.ok(fromJson.includes(detail));
+  const plain=normalizeRequest('/v1/responses',{input:[input[0],{...input[1],output:'clean'}]}).messages.at(-1).content;
+  assert.equal(plain,'Tool failed: clean');
+});
+test('Responses Agent 工具声明映射为上游函数并支持选择',()=>{
+  const tools=[{type:'local_shell'},{type:'apply_patch'},{type:'computer'},{type:'programmatic_tool_calling'}];
+  const value=normalizeRequest('/v1/responses',{input:'修复项目',tools,tool_choice:{type:'apply_patch'}});
+  assert.deepEqual(value.tools.map(tool=>tool.function.name),['__openai_local_shell','__openai_apply_patch','__openai_computer','__openai_program']);
+  assert.deepEqual(value.tools[0].function.parameters.properties.action.required,['command']);
+  assert.equal(value.tool_choice.function.name,'__openai_apply_patch');
+  const allowed=normalizeRequest('/v1/responses',{input:'检查',tools,tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'local_shell'},{type:'computer'}]}});
+  assert.equal(allowed.tool_choice,'required');assert.deepEqual(allowed.tools.map(tool=>tool.function.name),['__openai_local_shell','__openai_computer']);
+});
+test('Responses Agent 工具调用输出原生项目及流生命周期',async()=>{
+  const tagged='<api_tool_call>{"name":"__openai_local_shell","arguments":{"action":{"command":["git","status"]}}}</api_tool_call>';
+  await fixture(async call=>{
+    const body={input:'检查',tools:[{type:'local_shell'}]};
+    const result=await(await call('/v1/responses',body)).json(),item=result.output[0];
+    assert.equal(item.type,'local_shell_call');assert.equal(item.action.command[1],'status');assert.equal(item.action.type,'exec');assert.deepEqual(item.action.env,{});assert.equal(item.status,'completed');
+    const frames=(await Array.fromAsync(events((await call('/v1/responses',{...body,stream:true})).body))).map(frame=>JSON.parse(frame.data));
+    assert.ok(frames.some(frame=>frame.type==='response.output_item.added'&&frame.item.type==='local_shell_call'&&frame.item.status==='in_progress'));
+    assert.ok(frames.some(frame=>frame.type==='response.output_item.done'&&frame.item.type==='local_shell_call'&&frame.item.status==='completed'));
+    assert.equal(frames.some(frame=>frame.type.startsWith('response.function_call_arguments.')),false);
+  },tagged);
+});
+test('Responses Agent 工具输出项保留各自协议字段',()=>{
+  const original={tools:[{type:'local_shell'},{type:'shell',environment:{type:'local'}},{type:'apply_patch'},{type:'computer'},{type:'programmatic_tool_calling'}]};
+  const output=new ProtocolOutput('/v1/responses',{},async()=>{},original);
+  const call=(name,args)=>output.callItem({id:`call_${name}`,type:'function',function:{name:`__openai_${name}`,arguments:JSON.stringify(args)}});
+  const shell=call('shell',{action:{commands:['pwd']},environment:{type:'container'},caller:{type:'program',caller_id:'fake'}});assert.equal(shell.type,'shell_call');assert.equal(shell.environment.type,'local');assert.equal(shell.caller,undefined);
+  const patch=call('apply_patch',{operation:{type:'delete_file',path:'old.txt'}});assert.equal(patch.operation.path,'old.txt');
+  const computer=call('computer',{action:{type:'screenshot'}});assert.deepEqual(computer.pending_safety_checks,[]);
+  assert.deepEqual(call('computer',{action:{type:'click',x:10,y:20}}).action,{type:'click',x:10,y:20,button:'left'});
+  assert.equal(call('computer',{action:{type:'scroll',x:10,y:20,scroll_x:0,scroll_y:-300}}).action.scroll_y,-300);
+  assert.equal(call('computer',{action:{type:'drag',path:[{x:0,y:0},{x:10,y:10}]}}).action.path.length,2);
+  for(const action of [{type:'click',x:10},{type:'drag',path:[{x:0,y:0}]},{type:'keypress',keys:[]},{type:'scroll',x:0,y:0,scroll_y:10},{type:'type'}])assert.throws(()=>call('computer',{action}),/computer.action/);
+  const program=call('program',{code:'return 1'});assert.equal(program.type,'program');assert.match(program.fingerprint,/^fp_/);assert.equal(program.status,undefined);
+  const local=call('local_shell',{action:{command:['git','status']}});assert.equal(local.action.type,'exec');assert.deepEqual(local.action.env,{});
+  assert.equal(call('local_shell',{action:{command:['git','status'],timeout_ms:1000,working_directory:'/workspace'}}).action.timeout_ms,1000);
+  assert.equal(call('shell',{action:{commands:['pwd'],timeout_ms:1000,max_output_length:4096}}).action.max_output_length,4096);
+  assert.throws(()=>call('shell',{action:{commands:[]}}),/shell.action/);
+  assert.throws(()=>call('local_shell',{action:{command:['git','status'],timeout_ms:'1000'}}),/local_shell.action/);
+  assert.throws(()=>call('local_shell',{action:{command:['git','status'],working_directory:[]}}),/local_shell.action/);
+  assert.throws(()=>call('shell',{action:{commands:['pwd'],max_output_length:-1}}),/shell.action/);
+  assert.throws(()=>call('apply_patch',{operation:{type:'update_file',path:'a.txt'}}),/apply_patch.operation/);
+});
+test('Responses shell 命令流事件包含命令索引和完整内容',async()=>{
+  const frames=[];
+  const output=new ProtocolOutput('/v1/responses',{},frame=>{frames.push(JSON.parse(frame.split('data: ')[1]));},{tools:[{type:'shell'}]});
+  await output.toolCall({id:'call_shell',type:'function',function:{name:'__openai_shell',arguments:JSON.stringify({action:{commands:['pwd','git status']}})}});
+  assert.deepEqual(frames.filter(frame=>frame.type==='response.shell_call_command.done').map(frame=>[frame.command_index,frame.command]),[[0,'pwd'],[1,'git status']]);
+  assert.equal(frames.filter(frame=>frame.type==='response.output_item.done').length,1);
+});
+test('Responses 本地文件检索输出完整流式状态事件',async()=>{
+  const frames=[],item={id:'fs_1',type:'file_search_call',status:'completed',queries:['retry limit'],results:[{file_id:'file_1',filename:'README.md'}]};
+  const output=new ProtocolOutput('/v1/responses',{model:'qwen-instruct'},frame=>{frames.push(JSON.parse(frame.split('data: ')[1]));},{},{fileSearchItem:item});
+  await output.start();
+  assert.deepEqual(frames.map(frame=>frame.type).slice(2),[
+    'response.output_item.added','response.file_search_call.in_progress','response.file_search_call.searching','response.file_search_call.completed','response.output_item.done'
+  ]);
+  assert.equal(frames[2].item.results,undefined);
+  assert.deepEqual(frames.at(-1).item.results,item.results);
+  assert.deepEqual(frames.map(frame=>frame.sequence_number),frames.map((_,index)=>index));
+});
+test('Responses Agent 结果保留失败状态与结构化 shell 输出',()=>{
+  const input=[
+    {type:'shell_call',call_id:'call_shell',action:{commands:['npm test']}},
+    {type:'shell_call_output',call_id:'call_shell',status:'incomplete',output:[{stdout:'partial',stderr:'',outcome:{type:'timeout'}}]},
+    {type:'apply_patch_call',call_id:'call_patch',operation:{type:'update_file',path:'a.js',diff:'@@'}},
+    {type:'apply_patch_call_output',call_id:'call_patch',status:'failed',output:'conflict'},
+    {type:'program',call_id:'call_program',code:'return 1'},
+    {type:'program_output',call_id:'call_program',status:'failed',result:{error:'compilation failed'}},
+    {type:'computer_call',call_id:'call_computer',action:{type:'screenshot'}},
+    {type:'computer_call_output',call_id:'call_computer',status:'failed',output:'capture denied'},
+    {role:'user',content:'下一步'}
+  ];
+  const messages=normalizeRequest('/v1/responses',{input}).messages;
+  const shellResult=messages.find(message=>message.tool_call_id==='call_shell').content;
+  assert.match(shellResult,/^Tool incomplete: Command 1:/);
+  assert.match(shellResult,/stdout:\npartial/);
+  assert.match(shellResult,/Command timed out\./);
+  assert.equal(messages.find(message=>message.tool_call_id==='call_patch').content,'Tool failed: conflict');
+  assert.equal(messages.find(message=>message.tool_call_id==='call_program').content,'Tool failed: {"error":"compilation failed"}');
+  assert.equal(messages.find(message=>message.tool_call_id==='call_computer').content,'Tool failed: capture denied');
+  const failedFunction=normalizeRequest('/v1/responses',{input:[
+    {type:'function_call',call_id:'call_read',name:'read_file',arguments:'{}'},
+    {type:'function_call_output',call_id:'call_read',status:'failed',output:[{type:'output_text',text:'permission denied'}]}
+  ]}).messages;
+  assert.equal(failedFunction.at(-1).content,'Tool failed: permission denied');
+});
+test('Responses Agent 工具结果展开文本内容块并保留未知块',()=>{
+  const input=[
+    {type:'apply_patch_call',call_id:'call_patch',operation:{type:'update_file',path:'a.js',diff:'@@'}},
+    {type:'apply_patch_call_output',call_id:'call_patch',output:[{type:'output_text',text:'已修改 a.js'},{type:'custom',value:{lines:2}}]},
+    {type:'program',call_id:'call_program',code:'return 1'},
+    {type:'program_output',call_id:'call_program',result:[{type:'text',text:'编译成功'},{type:'output_text',text:'测试通过'}]}
+  ];
+  const messages=normalizeRequest('/v1/responses',{input}).messages;
+  assert.equal(messages.find(message=>message.tool_call_id==='call_patch').content,'已修改 a.js\n{"type":"custom","value":{"lines":2}}');
+  assert.equal(messages.find(message=>message.tool_call_id==='call_program').content,'编译成功\n测试通过');
 });
 test('Responses allowed_tools 只向上游暴露允许的工具',()=>{
   const normalized=normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'a',parameters:{}},{type:'custom',name:'patch'}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'custom',name:'patch'}]}});
   assert.equal(normalized.tool_choice,'required');assert.equal(normalized.tools.length,1);assert.equal(normalized.tools[0].function.name,'patch');assert.equal(normalized.tools[0].custom,true);
   assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'a'}],tool_choice:{type:'allowed_tools',mode:'auto',tools:[{type:'function',name:'missing'}]}}),/未知/);
+  const search=normalizeRequest('/v1/responses',{input:'查资料',tools:[{type:'web_search'},{type:'file_search',vector_store_ids:['vs_test']},{type:'function',name:'lookup',parameters:{type:'object'}}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'web_search'},{type:'function',name:'lookup'}]}});
+  assert.equal(search.net_go,true);assert.equal(search.tool_choice,'auto');assert.deepEqual(search.tools.map(tool=>tool.function.name),['lookup']);
+  const files=normalizeRequest('/v1/responses',{input:'查文档',tools:[{type:'web_search'},{type:'file_search',vector_store_ids:['vs_test']}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'file_search'}]}});
+  assert.equal(files.net_go,false);assert.equal(files.tool_choice,'auto');assert.deepEqual(files.tools,[]);
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',tools:[{type:'web_search'}],tool_choice:{type:'allowed_tools',mode:'auto',tools:[{type:'file_search'}]}}),/未知/);
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',tools:[{type:'web_search'}],tool_choice:{type:'file_search'}}),/未知/);
 });
 test('Responses function tool 保留 strict 参数校验语义',()=>{
   const value=normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'lookup',strict:false,parameters:{type:'object',required:['query']}}]});
@@ -195,6 +347,8 @@ test('Responses 长尾字段回显，流选项可生成混淆填充',async()=>{
 test('Responses reasoning 与 Anthropic thinking 转成推理强度',()=>{
   assert.equal(normalizeRequest('/v1/responses',{input:'x',reasoning:{effort:'high'}}).reasoning_effort,'high');
   assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,thinking:{type:'enabled',budget_tokens:16}}).reasoning_effort,'high');
+  assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,thinking:{type:'disabled'}}).reasoning_effort,'none');
+  assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,thinking:{type:'disabled'},output_config:{effort:'max'}}).reasoning_effort,'none');
   assert.equal(normalizeRequest('/v1/responses',{input:'x',reasoning:{effort:'max'}}).reasoning_effort,'max');
   assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'x'}],max_tokens:32,output_config:{effort:'max'}}).reasoning_effort,'max');
 });
@@ -222,8 +376,11 @@ test('Kimi K3 Chat 执行官方固定采样参数约束',()=>{
   const base={model:'kimi-k3',messages:[{role:'user',content:'x'}]};
   for(const temperature of [0,0.6,1])assert.equal(normalizeRequest('/v1/chat/completions',{...base,temperature}).temperature,temperature);
   assert.equal(normalizeRequest('/v1/chat/completions',{...base,thinking:{type:'disabled'},temperature:0.6,top_p:0.95,presence_penalty:0,frequency_penalty:0,n:1}).temperature,0.6);
+  assert.equal(normalizeRequest('/v1/chat/completions',{...base,reasoning_effort:'none',temperature:0.6}).temperature,0.6);
+  assert.equal(normalizeRequest('/v1/chat/completions',{...base,thinking:{type:'enabled'},reasoning_effort:'none',temperature:0.8}).temperature,0.8);
   for(const body of [
     {...base,temperature:1.1},{...base,thinking:{type:'disabled'},temperature:0},
+    {...base,reasoning_effort:'none',temperature:0},
     {...base,top_p:0.8},{...base,presence_penalty:0.5},{...base,frequency_penalty:0.5},{...base,n:2}
   ])assert.throws(()=>normalizeRequest('/v1/chat/completions',body),/Kimi K3/);
 });
@@ -235,6 +392,12 @@ test('三种协议的服务端搜索映射到 netGo',()=>{
   assert.equal(normalizeRequest('/v1/chat/completions',{messages:[{role:'user',content:'新闻'}],web_search_options:{}}).net_go,true);
   const response=normalizeRequest('/v1/responses',{input:'新闻',tools:[{type:'web_search'}]});assert.equal(response.net_go,true);assert.deepEqual(response.tools,[]);
   const message=normalizeRequest('/v1/messages',{messages:[{role:'user',content:'新闻'}],max_tokens:32,tools:[{type:'web_search_20250305',name:'web_search'}]});assert.equal(message.net_go,true);assert.deepEqual(message.tools,[]);
+  assert.equal(normalizeRequest('/v1/responses',{input:'新闻',tools:[{type:'web_search'}],tool_choice:'none'}).net_go,false);
+  assert.equal(normalizeRequest('/v1/responses',{input:'新闻',tools:[{type:'web_search'},{type:'function',name:'lookup',parameters:{type:'object'}}],tool_choice:{type:'function',name:'lookup'}}).net_go,false);
+  assert.equal(normalizeRequest('/v1/responses',{input:'新闻',tools:[{type:'web_search'}],tool_choice:'required'}).tool_choice,'auto');
+  assert.equal(normalizeRequest('/v1/responses',{input:'文档',tools:[{type:'file_search',vector_store_ids:['vs_test']}],tool_choice:'required'}).tool_choice,'auto');
+  assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'新闻'}],max_tokens:32,tools:[{type:'web_search_20250305',name:'web_search'}],tool_choice:{type:'none'}}).net_go,false);
+  assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'新闻'}],max_tokens:32,tools:[{type:'web_search_20250305',name:'web_search'}],tool_choice:{type:'any'}}).tool_choice,'auto');
 });
 
 test('Legacy Completions 转成单轮续写并拒绝不可兑现选项',()=>{
@@ -324,7 +487,8 @@ test('Responses reasoning summary 与 Messages thinking 同时支持 JSON、SSE 
         const frames=(await Array.fromAsync(events(response.body))).map(x=>JSON.parse(x.data));
         if(path==='/v1/responses') {
           assert.equal(frames.filter(x=>x.type==='response.reasoning_summary_text.delta').map(x=>x.delta).join(''),'先思考');
-          const added=frames.find(x=>x.type==='response.output_item.added').item;assert.equal(added.type,'reasoning');assert.match(added.encrypted_content,/^enc_/);
+          const added=frames.find(x=>x.type==='response.output_item.added').item;assert.equal(added.type,'reasoning');assert.equal(added.encrypted_content,undefined);
+          assert.match(frames.find(x=>x.type==='response.output_item.done'&&x.item.type==='reasoning').item.encrypted_content,/^enc_v1_/);
           assert.deepEqual(frames.at(-1).response.output.map(x=>x.type),['reasoning','message']);
         } else {
           assert.equal(frames.find(x=>x.delta?.type==='thinking_delta').delta.thinking,'先思考');

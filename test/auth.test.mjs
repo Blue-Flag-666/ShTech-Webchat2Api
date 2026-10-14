@@ -56,3 +56,18 @@ test('过期 token 并发只登录一次，静态 token 不伪造续期',async()
   assert.deepEqual(await Promise.all([manager.get(),manager.get(),manager.get()]),['new-token','new-token','new-token']);assert.equal(calls,1);
   await assert.rejects(new TokenManager({token:expired}).get(),/失效/);
 });
+
+test('取消单个请求的 token 等待不会中断其他请求共用的登录',async()=>{
+  let finish,calls=0;
+  const manager=new TokenManager({username:'u',password:'p'},async()=>{calls++;return new Promise(resolve=>{finish=resolve;});});
+  const controller=new AbortController();
+  const cancelled=manager.get(false,controller.signal);
+  const waiting=manager.get();
+  controller.abort();
+  await assert.rejects(cancelled,/取消/);
+  assert.equal(calls,1);
+  finish('shared-token');
+  assert.equal(await waiting,'shared-token');
+  assert.equal(await manager.get(),'shared-token');
+  assert.equal(calls,1);
+});

@@ -81,7 +81,7 @@ function page(values,{after,before,limit=20,order='desc'}={}){
   if(!Number.isInteger(limit)||limit<1||limit>100||!['asc','desc'].includes(order)||after&&before)throw failure(400,'分页参数无效');
   let data=[...values].sort((a,b)=>(a.created_at-b.created_at)||a.id.localeCompare(b.id));if(order==='desc')data.reverse();
   const cursor=after||before;if(cursor){const index=data.findIndex(value=>value.id===cursor);if(index<0)throw failure(400,'分页游标不存在');data=after?data.slice(index+1):data.slice(0,index);}
-  const has_more=data.length>limit;data=data.slice(0,limit);return{object:'list',data:clone(data),first_id:data[0]?.id??null,last_id:data.at(-1)?.id??null,has_more};
+  const has_more=data.length>limit;data=before?data.slice(-limit):data.slice(0,limit);return{object:'list',data:clone(data),first_id:data[0]?.id??null,last_id:data.at(-1)?.id??null,has_more};
 }
 function queryText(input){
   const values=[];
@@ -165,9 +165,13 @@ export class VectorStore {
     const ranking=body.ranking_options??{};object(ranking,'ranking_options');keys(ranking,['ranker','score_threshold'],'ranking_options');
     if(ranking.ranker!==undefined&&typeof ranking.ranker!=='string')throw failure(400,'ranker 必须是字符串');const threshold=ranking.score_threshold??0;if(typeof threshold!=='number'||threshold<0||threshold>1)throw failure(400,'score_threshold 必须为 0–1');
     const results=[];for(const file of entry.files.values())if(file.value.status==='completed'&&matches(file.value.attributes,body.filters))for(const text of file.chunks){const score=relevance(text,queries);if(score>=threshold&&score>0)results.push({file_id:file.value.id,filename:file.filename,score:Number(score.toFixed(6)),attributes:clone(file.value.attributes),content:[{type:'text',text}]});}
-    results.sort((a,b)=>b.score-a.score||a.file_id.localeCompare(b.file_id));return{object:'vector_store.search_results.page',search_query:Array.isArray(body.query)?clone(body.query):body.query,data:results.slice(0,maximum),has_more:results.length>maximum,next_page:null};
+    // Search returns the requested top results, not a cursor-paginated collection.
+    results.sort((a,b)=>b.score-a.score||a.file_id.localeCompare(b.file_id));return{object:'vector_store.search_results.page',search_query:Array.isArray(body.query)?clone(body.query):body.query,data:results.slice(0,maximum),has_more:false,next_page:null};
   }
   responseSearch(input){
+    const choice=input.tool_choice;
+    if(choice==='none'||choice&&typeof choice==='object'&&choice.type!=='file_search'
+      &&!(choice.type==='allowed_tools'&&Array.isArray(choice.tools)&&choice.tools.some(tool=>tool?.type==='file_search')))return null;
     if(!Array.isArray(input.tools))return null;const tools=input.tools.filter(tool=>tool?.type==='file_search');if(!tools.length)return null;
     const query=queryText(input);if(!query)throw failure(400,'file_search 需要可搜索的文本输入');
     const all=[];for(const tool of tools){
