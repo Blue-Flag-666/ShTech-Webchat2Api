@@ -10,7 +10,7 @@ RUN npm run build:server
 
 FROM alpine:3.24.2
 
-RUN apk add --no-cache ca-certificates libstdc++ \
+RUN apk add --no-cache ca-certificates libstdc++ libatomic \
   && addgroup -g 1000 node \
   && adduser -u 1000 -G node -s /sbin/nologin -D node \
   && mkdir -p /data \
