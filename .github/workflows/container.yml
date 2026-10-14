@@ -105,6 +105,21 @@ jobs:
       - run: python -m pip install ./.ci-hermes
       - name: Check actual Hermes agent without school requests
         run: node scripts/verify-hermes.mjs
+  deepseek-harness-compat:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26.11.1'
+          cache: npm
+      - run: npm install --global npm@12.2.0 --ignore-scripts
+      - run: npm ci --ignore-scripts
+      - run: npm install --global --ignore-scripts @deepseek-ai/dsh@0.2.0-rc.2
+      - name: Check actual DeepSeek Harness without school requests
+        run: node scripts/verify-deepseek-harness.mjs
   image-test:
     needs: test
     runs-on: ubuntu-latest
@@ -199,7 +214,7 @@ jobs:
           path: dist/${{ matrix.artifact }}
           archive: false
   publish:
-    needs: [image-test, opencode-compat, pi-ai-compat, hermes-compat]
+    needs: [image-test, opencode-compat, pi-ai-compat, hermes-compat, deepseek-harness-compat]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
