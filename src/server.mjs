@@ -785,7 +785,8 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         if(req.method==='DELETE'&&!storedMatch[2]){const job=backgroundJobs.get(responseId);if(job){job.deleted=true;job.controller.abort();backgroundJobs.delete(responseId);}const log=backgroundStreams.get(responseId);if(log){closeBackground(log);backgroundStreams.delete(responseId);}responseStore.delete(responseId);return json(res,200,{id:responseId,object:'response.deleted',deleted:true});}
         throw error(405,'该响应资源不支持此方法');
       }
-      const publicModel=model=>Object.fromEntries(Object.entries(model).filter(([key])=>key!=='upstream_id'));
+      const publicModel=model=>({...Object.fromEntries(Object.entries(model).filter(([key])=>key!=='upstream_id')),
+        max_completion_tokens:modelBudget(model).output});
       if (req.method === 'GET' && path === '/v1/models') {
         const catalogue=await models();
         if(!modelCache.confirmed)throw error(503,'模型目录暂不可用');

@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from '../src/server.mjs';
-import { modelDirectory } from '../src/models.mjs';
+import { modelDirectory, modelBudget } from '../src/models.mjs';
 import { listenForFetch } from '../test/fixtures.mjs';
 
 if(process.env.CI!=='true'||process.platform!=='linux')throw new Error('This app check is restricted to Linux CI');
@@ -23,6 +23,7 @@ let selected,filePath,sentinel,requests=0,app,appClosed,run,runClosed,appOutput=
 const server=createServer({key:'ci-aider-key',token:'ci-placeholder',group:'',timeout:10000},async(url,options)=>{
   assert.equal(new URL(url).pathname,'/htk/chat/start/chat');
   const body=JSON.parse(options.body);assert.equal(body.aiType,selected.upstream_id);assert.equal(body.rootAiType,'xinference');
+  assert.ok(body.maxToken<=modelBudget(selected).output,'AiderDesk treated total context as the output budget');
   const marker='Tool declarations:\n',offset=body.chatInfo.indexOf(marker);let content='CI session';
   if(offset>=0){
     const declarations=JSON.parse(body.chatInfo.slice(offset+marker.length).split('\n')[0]);
@@ -67,11 +68,15 @@ try{
   await api('/providers','POST',[{id:'shtech',name:'School CI',provider:{name:'openai-compatible',apiKey:'ci-aider-key',baseUrl:env.OPENAI_API_BASE}}]);
   const discovery=await api('/models?reload=true'),discovered=discovery.models;
   assert.ok(Array.isArray(discovered),`Invalid model discovery response: ${JSON.stringify(discovery)}`);
-  for(const model of models)assert.ok(discovered.some(item=>item.id===model.id&&item.providerId==='shtech'),`Model discovery lost ${model.id}`);
+  for(const model of models){
+    const discoveredModel=discovered.find(item=>item.id===model.id&&item.providerId==='shtech');assert.ok(discoveredModel,`Model discovery lost ${model.id}`);
+    assert.equal(discoveredModel.maxInputTokens,model.context_window);
+    assert.equal(discoveredModel.maxOutputTokensLimit,modelBudget(model).output);
+  }
   const profiles=await api('/agent-profiles');assert.ok(profiles.length,'AiderDesk did not create default profiles');
   const template=profiles.find(profile=>profile.id==='default')||profiles[0];
   const approvals=Object.fromEntries(Object.keys(template.toolApprovals||{}).map(name=>[name,'never']));approvals[readTool]='always';approvals[writeTool]='always';
-  const profile={...template,id:'shtech-ci',name:'School CI',provider:'shtech',maxIterations:6,maxTokens:1024,minTimeBetweenToolCalls:0,
+  const profile={...template,id:'shtech-ci',name:'School CI',provider:'shtech',maxIterations:6,maxTokens:undefined,minTimeBetweenToolCalls:0,
     includeContextFiles:false,includeRepoMap:false,usePowerTools:true,useAiderTools:false,useTodoTools:false,useSubagents:false,useTaskTools:false,useMemoryTools:false,useSkillsTools:false,
     enabledServers:[],toolApprovals:approvals};
   await api('/agent-profile/create','POST',{profile:{...profile,model:models[0].id}});
