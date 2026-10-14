@@ -155,11 +155,11 @@ export function createToolCallStream(policy,makeId) {
   const safeTextEnd=()=>{
     const names=['<api_tool_call>','<tool_call>'];
     let end=source.length;
-    for(let index=source.lastIndexOf('<');index>=textCursor;index=source.lastIndexOf('<',index-1)){
+    for(let index=source.lastIndexOf('<');index>=textCursor;index=index>0?source.lastIndexOf('<',index-1):-1){
       const suffix=source.slice(index).replace(/\s/g,'').toLowerCase();
       if(names.some(name=>name.startsWith(suffix)||suffix.startsWith(name.slice(0,-1))))end=index;
     }
-    for(let index=source.lastIndexOf('`');index>=textCursor;index=source.lastIndexOf('`',index-1)){
+    for(let index=source.lastIndexOf('`');index>=textCursor;index=index>0?source.lastIndexOf('`',index-1):-1){
       const suffix=source.slice(index).toLowerCase();
       if('```json'.startsWith(suffix)||/^```(?:json\b|\s)/.test(suffix))end=Math.min(end,index);
     }

@@ -10,15 +10,15 @@
     "start": "node src/cli.mjs",
     "build:cli": "node scripts/build-cli.mjs",
     "build:server": "node scripts/build-server.mjs",
-    "test": "node --test",
-    "test:sdk": "node --test test/sdk-compat.ci.mjs"
+    "test": "node --test --test-timeout=30000 test/*.test.mjs",
+    "test:sdk": "node --test --test-timeout=30000 test/sdk-compat.ci.mjs"
   },
   "devDependencies": {
-    "@ai-sdk/openai-compatible": "^3.0.55",
-    "@anthropic-ai/sdk": "^0.128.0",
-    "ai": "^7.0.113",
+    "@ai-sdk/openai-compatible": "^3.0.68",
+    "@anthropic-ai/sdk": "^0.133.0",
+    "ai": "^7.0.139",
     "esbuild": "^0.28.2",
-    "openai": "^7.23.0"
+    "openai": "^7.32.0"
   },
   "dependencies": {
     "fflate": "0.8.3",

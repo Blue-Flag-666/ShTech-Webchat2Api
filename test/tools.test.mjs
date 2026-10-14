@@ -2,6 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createToolCallStream, normalizeMessages, parseToolCalls, toolPolicy } from '../src/tools.mjs';
 const tools=[{type:'function',function:{name:'weather',parameters:{type:'object',properties:{city:{type:'string'}},required:['city'],additionalProperties:false}}}];
+
+test('第零位的标签或围栏前缀不会让向前扫描陷入死循环',()=>{
+  for(const prefix of ['<','`','``','<not-a-tool>','`plain text']){
+    const stream=createToolCallStream(toolPolicy(tools),()=> 'call_boundary');
+    assert.deepEqual(stream.push(prefix),[]);
+    stream.push('普通后续文本');
+    assert.equal(stream.finish().content,prefix+'普通后续文本');
+  }
+});
 test('工具调用解析保留标识与 JSON 参数',()=>{
   const policy=toolPolicy(tools,'required');
   const result=parseToolCalls('<api_tool_call>{"name":"weather","arguments":{"city":"上海"}}</api_tool_call>',policy,()=> 'call_test');

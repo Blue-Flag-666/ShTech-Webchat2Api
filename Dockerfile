@@ -1,14 +1,14 @@
-FROM node:26.8.2-alpine AS node-runtime
+FROM node:26.11.1-alpine AS node-runtime
 
 FROM node-runtime AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
+RUN npm install --global npm@12.2.0 --ignore-scripts && npm ci --ignore-scripts
 COPY src ./src
 COPY scripts/build-server.mjs ./scripts/build-server.mjs
 RUN npm run build:server
 
-FROM alpine:3.24.1
+FROM alpine:3.24.2
 
 RUN apk add --no-cache ca-certificates libstdc++ \
   && addgroup -g 1000 node \
