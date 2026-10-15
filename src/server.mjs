@@ -23,6 +23,7 @@ import { IdempotencyStore } from './idempotency.mjs';
 import { RequestLogger } from './request-log.mjs';
 import { normalizeUpstreamEvent, protocolFailure } from './upstream-sse.mjs';
 import { upstreamBusinessFailure, upstreamDiagnostic } from './upstream-errors.mjs';
+import { textHistoryRequest } from './upstream-history.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
 const GROUP_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-';
@@ -37,6 +38,7 @@ export function configuration(env = process.env) {
     group: env.GENAI_CHAT_GROUP_ID || '', key: secret(env,'API_KEY'), uploadToken:secret(env,'GENAI_UPLOAD_TOKEN'),
     startupCheck: env.GENAI_STARTUP_CHECK !== 'false',
     debugUpstream: env.GENAI_DEBUG_UPSTREAM === 'true',
+    historyFallback: env.GENAI_HISTORY_FALLBACK !== 'false',
     netGo: bool(env.GENAI_NET_GO), timeout: Number(env.GENAI_TIMEOUT_MS || 120000), modelTtl: Number(env.GENAI_MODEL_TTL_MS || 300000),logFile:env.GENAI_LOG_FILE || '',
     concurrency:Number(env.GENAI_CONCURRENCY || 1),queueSize:Number(env.GENAI_QUEUE_SIZE || 32),queueTimeout:Number(env.GENAI_QUEUE_TIMEOUT_MS || 120000),modelLimits:modelLimitsConfig(env.GENAI_MODEL_LIMITS),
     requestLimit:Number(env.GENAI_REQUEST_LIMIT_MB || 144)*1024*1024,
@@ -285,10 +287,10 @@ function upstreamBackoff(status,attempt) {
 }
 const retryableNetworkCodes=new Set(['ECONNRESET','ECONNREFUSED','ECONNABORTED','EPIPE','ETIMEDOUT','EAI_AGAIN','EHOSTUNREACH','ENETUNREACH','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_CONNECT_TIMEOUT','UND_ERR_SOCKET']);
 const retryableNetworkError=cause=>retryableNetworkCodes.has(cause?.code??cause?.cause?.code);
-async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, onDispatch, diagnostics) {
+async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, onDispatch, diagnostics, recovery) {
   let renewed=false,attempt=0;
   const request=JSON.parse(options.body),model=request.aiType,trace=randomUUID().slice(0,8);
-  let dispatches=0;
+  let dispatches=0,historyRecovered=false;
   while(true) {
     let response;
     try{dispatches++;onDispatch?.();response=await fetcher(UPSTREAM,options);}catch(cause){
@@ -332,9 +334,22 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
           console.warn(`[上游业务] ${failure.message}`);
           if(diagnostics)console.warn(`[上游诊断] ${JSON.stringify({trace,attempt:dispatches,model,category:failure.category,
             max_output_tokens:request.maxToken,history_messages:request.messages?.length??0,
+            history_mode:historyRecovered?'text':'structured',
             thinking:request.thinking??null,session:diagnostics.group?'configured':'per-request',
             ...upstreamDiagnostic(value,[diagnostics.key,diagnostics.cookie,tokenManager.username,tokenManager.password,tokenManager.token,options.headers['x-access-token']])})}`);
           if(failure.status===401&&!emitted&&!renewed&&tokenManager.renewable){retry=true;break;}
+          if(!emitted&&failure.category==='unknown'&&Number(value.code??value.error?.code)===500&&recovery&&request.messages.length){
+            const group=recovery.resetSession&&!request.fileIds?.length?newChatGroupId():request.chatGroupId;
+            const fallback=textHistoryRequest(request,group);
+            const estimate=estimateTokens({messages:fallback.messages,chatInfo:fallback.chatInfo})+fallback.maxToken;
+            if(!historyRecovered&&attempt<retries&&estimate<=recovery.contextWindow){
+              console.warn(`[上游恢复] 模型 ${model} 将 ${request.messages.length} 条历史保留为文本，重试一次`);
+              Object.assign(request,fallback);options.body=JSON.stringify(request);historyRecovered=true;
+              retryFailure=failure;break;
+            }
+            throw failure;
+          }
+          if(historyRecovered&&failure.category==='unknown')throw failure;
           if(!emitted&&[502,503,504].includes(failure.status)&&attempt<retries){retryFailure=failure;break;}
           throw failure;
         }
@@ -386,7 +401,7 @@ export async function* guardedEvents(source,circuit,model,signal) {
     throw cause;
   }finally{if(!failed){if(completed)circuit.success(model);else circuit.release(model);}}
 }
-async function repairGeneratedOutput(fetcher,tokenManager,config,circuit,model,headers,body,invalidText,reason,policy,formatPolicy,signal,contextWindow) {
+async function repairGeneratedOutput(fetcher,tokenManager,config,circuit,model,headers,body,invalidText,reason,policy,formatPolicy,signal,contextWindow,recovery) {
   const prompt=[`The previous answer failed validation: ${String(reason).slice(0,500)}. Correct it and return the complete answer again.`,
     policy?toolPrompt(policy):outputPrompt(formatPolicy)].filter(Boolean).join('\n\n');
   const correction={...body,chatInfo:prompt};
@@ -403,7 +418,7 @@ async function repairGeneratedOutput(fetcher,tokenManager,config,circuit,model,h
     excerptLimit=Math.max(512,Math.floor(excerptLimit/2));
   }
   let text='',reasoning='',last,seen=false,finished=false;
-  const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers:{...headers},body:JSON.stringify(correction),signal,redirect:'error'},tokenManager,config.upstreamRetries??2,undefined,config.debugUpstream?config:null),circuit,model,signal);
+  const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers:{...headers},body:JSON.stringify(correction),signal,redirect:'error'},tokenManager,config.upstreamRetries??2,undefined,config.debugUpstream?config:null,recovery),circuit,model,signal);
   for await(const item of source) {
     if(item.data==='[DONE]')break;
     if(item.event==='error')throw error(502,'修复请求收到上游错误事件');
@@ -939,7 +954,9 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       release=await queue.acquire(controller.signal,selected.upstream_id||selected.id);
       timer = setTimeout(() => {timedOut=true;controller.abort();}, config.timeout);
       const accessToken=await tokenManager.get(false,controller.signal);
-      if(typeof (input.chat_group_id??config.group)==='string'&&!(input.chat_group_id??config.group).trim())input.chat_group_id=newChatGroupId();
+      const automaticGroup=typeof (input.chat_group_id??config.group)==='string'&&!(input.chat_group_id??config.group).trim();
+      if(automaticGroup)input.chat_group_id=newChatGroupId();
+      const recovery=config.historyFallback===false?null:{contextWindow,resetSession:automaticGroup};
       const fileIds=await uploadNativeFiles(preparedFiles.files,{chatGroupId:input.chat_group_id??config.group,aiType:selected.upstream_id||selected.id,accessToken,cookie:config.cookie,signal:controller.signal,fetcher});
       const imagePayload=await prepareImages(retainedImageInputs,config,accessToken,controller.signal,imageFetcher,frontendFetcher);
       const body = upstreamBody(input, config, catalogue, formatPolicy,{...imagePayload,...(fileIds.length?{fileIds}:{})});
@@ -947,7 +964,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         'x-access-token': accessToken, Origin: 'https://genai.shanghaitech.edu.cn',
         Referer: 'https://genai.shanghaitech.edu.cn/dashboard/analysis' };
       if (config.cookie) headers.Cookie = config.cookie;
-      const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config.upstreamRetries??2,()=>idempotency.dispatched(res),config.debugUpstream?config:null),circuit,selected.upstream_id||selected.id,controller.signal);
+      const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config.upstreamRetries??2,()=>idempotency.dispatched(res),config.debugUpstream?config:null,recovery),circuit,selected.upstream_id||selected.id,controller.signal);
       // Even an SSE heartbeat commits HTTP headers and prevents a repair error
       // from being returned with its correct status before output is accepted.
       const sourceEvents=input.stream&&(policy||formatPolicy)&&!config.outputRepair?withHeartbeats(source):source;
@@ -1091,7 +1108,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         parsed=validateOutput(parsed);
       }catch(cause){
         if(!config.outputRepair||cause.status!==502||res.headersSent||!policy&&!formatPolicy)throw cause;
-        const repair=await repairGeneratedOutput(fetcher,tokenManager,config,circuit,selected.upstream_id||selected.id,headers,body,nativePayload||bufferedText,cause.message,policy,formatPolicy,controller.signal,contextWindow);
+        const repair=await repairGeneratedOutput(fetcher,tokenManager,config,circuit,selected.upstream_id||selected.id,headers,body,nativePayload||bufferedText,cause.message,policy,formatPolicy,controller.signal,contextWindow,recovery);
         parsed=validateOutput(parseToolCalls(repair.text,policy,makeCallId));
         repaired=true;repairPromptBytes=repair.promptBytes;responseBytes+=Buffer.byteLength(repair.text)+Buffer.byteLength(repair.reasoning);
         reasoning=suppressReasoning?'':repair.reasoning;

@@ -422,6 +422,65 @@ test('上游诊断默认关闭，显式开启时只记录脱敏错误字段和�
     }
   }finally{console.warn=original;}
 });
+
+test('四种模型的历史触发无说明 500 时保留完整历史，用新会话文本恢复一次',async()=>{
+  const records=['chatglm','qwen-instruct','deepseek-pro','Kimi-k3'].map(aiType=>({aiType,rootAiType:'xinference',maxToken:524288,enableDeepThink:1}));
+  for(const record of records){
+    const bodies=[];
+    await withServer(async(_url,options)=>{
+      const body=JSON.parse(options.body);bodies.push(body);
+      if(bodies.length===1){assert.equal(body.messages.length,9);return new Response(sse([{success:false,code:500}]),{headers:{'content-type':'text/event-stream'}});}
+      assert.equal(bodies.length,2);assert.deepEqual(body.messages,[bodies[0].messages[0]]);
+      assert.ok(body.chatInfo.includes(JSON.stringify(bodies[0].messages)));
+      assert.ok(body.chatInfo.endsWith(bodies[0].chatInfo));
+      assert.notEqual(body.chatGroupId,bodies[0].chatGroupId);
+      assert.equal(body.aiType,record.aiType);assert.equal(body.maxToken,2876);assert.equal(body.thinking,false);
+      return new Response(sse([chunk('历史已保留，继续回答','stop')]),{headers:{'content-type':'text/event-stream'}});
+    },async call=>{
+      const messages=[{role:'system',content:'请保留项目约束'}];
+      for(let i=0;i<4;i++)messages.push({role:'user',content:`历史问题 ${i}`},{role:'assistant',content:`历史回答 ${i}`,reasoning_content:`历史思考 ${i}`});
+      messages.push({role:'user',content:'继续工作'});
+      const response=await call({model:record.aiType,max_tokens:2876,thinking:{type:'disabled'},messages});
+      assert.equal(response.status,200);assert.equal((await response.json()).choices[0].message.content,'历史已保留，继续回答');
+    },{group:'',upstreamRetries:2,timeout:5000,modelFetcher:async()=>({success:true,result:{records}})});
+    assert.equal(bodies.length,2);
+  }
+});
+
+test('历史兼容恢复失败不重复重放，显式会话 ID 保持不变',async()=>{
+  for(const historyFallback of [true,false]){
+    const bodies=[];
+    await withServer(async(_url,options)=>{
+      bodies.push(JSON.parse(options.body));return new Response(sse([{success:false,code:500}]),{headers:{'content-type':'text/event-stream'}});
+    },async call=>{
+      const response=await call({...request,chat_group_id:'explicit-session',messages:[{role:'user',content:'旧问题'},{role:'assistant',content:'旧回答'},{role:'user',content:'继续'}]});
+      assert.equal(response.status,502);await response.json();
+    },{historyFallback,upstreamRetries:1,timeout:5000});
+    assert.equal(bodies.length,2);
+    assert.equal(bodies[1].chatGroupId,'explicit-session');
+    assert.equal(bodies[1].messages.length,historyFallback?0:2);
+  }
+});
+
+test('已输出内容后不切换历史格式',async()=>{
+  let attempts=0;
+  const messages=[{role:'user',content:'之前'},{role:'assistant',content:'回答'},{role:'user',content:'继续'}];
+  await withServer(async()=>{attempts++;return new Response(sse([chunk('部分'),{code:500,success:false}]),{headers:{'content-type':'text/event-stream'}});},async call=>{
+    const response=await call({...request,messages,stream:true}),body=await response.text();assert.match(body,/部分/);assert.match(body,/业务码 500/);
+  },{upstreamRetries:2,timeout:5000});
+  assert.equal(attempts,1);
+});
+
+test('完整文本历史恢复超过上下文窗口时不重发、不截断历史',async()=>{
+  const input={...request,max_tokens:30,messages:[{role:'user',content:'历史问题'},{role:'assistant',content:'历史回答'},{role:'user',content:'继续'}]};
+  const body=upstreamBody(input,config,[{id:'qwen-instruct',max_tokens:100000}]);
+  const context=Math.ceil(Buffer.byteLength(JSON.stringify({messages:body.messages,chatInfo:body.chatInfo}))/3)+35;
+  let attempts=0;
+  await withServer(async()=>{attempts++;return new Response(sse([{success:false,code:500}]),{headers:{'content-type':'text/event-stream'}});},async call=>{
+    const response=await call(input);assert.equal(response.status,502);await response.json();
+  },{contextAuto:false,upstreamRetries:2,modelFetcher:async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:context}]}})});
+  assert.equal(attempts,1);
+});
 test('未配置会话 ID 时每个请求生成网页式 ID，显式 ID 保持不变',async()=>{
   const groups=[];
   await withServer(async(_url,options)=>{

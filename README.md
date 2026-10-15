@@ -76,6 +76,8 @@ docker run -d --name shtech-webchat-api --restart unless-stopped --env-file .env
 
 排查笼统的上游业务错误时，可临时设置 `GENAI_DEBUG_UPSTREAM=true`，查看 `[上游诊断]` 中的脱敏错误字段；排查后关闭。
 
+旧会话遇到无说明的上游 500 时，服务会在输出前尝试一次文本历史兼容恢复，保留完整历史。可用 `GENAI_HISTORY_FALLBACK=false` 关闭；恢复仍受上下文和重试额度限制。
+
 源码部署可复制 `.env.example` 为 `.env`，填写凭证后执行 `docker compose up -d`。直接运行源码需要 Node.js 26+：
 
 ```bash
