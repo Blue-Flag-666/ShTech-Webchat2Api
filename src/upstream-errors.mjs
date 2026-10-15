@@ -1,5 +1,5 @@
 const numericCode = value => /^(?:[1-9]\d{0,8}|0)$/.test(String(value ?? '')) ? Number(value) : undefined;
-const textFields = ['message', 'msg', 'errorMessage', 'error_description', 'detail'];
+const textFields = ['message', 'msg', 'errorMessage', 'error_description', 'detail', 'errMsg', 'errorMsg', 'reason'];
 function errorTexts(value, depth = 0) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 3 || value.choices) return [];
   const texts = textFields.flatMap(key => typeof value[key] === 'string' && value[key] ? [value[key]] : []);

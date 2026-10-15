@@ -335,6 +335,8 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
           if(diagnostics)console.warn(`[上游诊断] ${JSON.stringify({trace,attempt:dispatches,model,category:failure.category,
             max_output_tokens:request.maxToken,history_messages:request.messages?.length??0,
             history_mode:historyRecovered?'text':'structured',
+            estimated_input_tokens:estimateTokens({messages:request.messages,chatInfo:request.chatInfo}),
+            history_roles:request.messages.map(message=>['system','user','assistant'].includes(message.role)?message.role:'other'),
             thinking:request.thinking??null,session:diagnostics.group?'configured':'per-request',
             ...upstreamDiagnostic(value,[diagnostics.key,diagnostics.cookie,tokenManager.username,tokenManager.password,tokenManager.token,options.headers['x-access-token']])})}`);
           if(failure.status===401&&!emitted&&!renewed&&tokenManager.renewable){retry=true;break;}
