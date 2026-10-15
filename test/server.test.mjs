@@ -345,6 +345,43 @@ async function withServer(fetcher, fn, overrides = {}) {
   try { await fn(call, base); } finally { server.closeAllConnections(); await new Promise(r => server.close(r)); }
 }
 
+test('流式及非流式长回答持续输出时不受请求总时长限制',async()=>{
+  for(const stream of [false,true]){
+    let interval;
+    await withServer(async(_url,options)=>new Response(new ReadableStream({start(controller){
+      let count=0;
+      interval=setInterval(()=>{
+        controller.enqueue(new TextEncoder().encode(sse([chunk('持续',++count===12?'stop':null)])));
+        if(count===12){clearInterval(interval);controller.close();}
+      },40);
+      options.signal.addEventListener('abort',()=>{clearInterval(interval);try{controller.error(options.signal.reason);}catch{}},{once:true});
+    },cancel(){clearInterval(interval);}}),{headers:{'content-type':'text/event-stream'}}),async call=>{
+      const response=await call({...request,stream});assert.equal(response.status,200);
+      if(stream){const body=await response.text();assert.match(body,/\[DONE\]/);assert.doesNotMatch(body,/timeout|超时/);}
+      else assert.equal((await response.json()).choices[0].message.content,'持续'.repeat(12));
+    },{timeout:250,upstreamRetries:0});
+  }
+});
+
+test('上游停止输出或只发心跳时仍会超时，并取消上游连接',async()=>{
+  for(const mode of ['silent','partial','heartbeat']){
+    let interval,signal;
+    await withServer(async(_url,options)=>{
+      signal=options.signal;
+      return new Response(new ReadableStream({start(controller){
+        if(mode==='partial')controller.enqueue(new TextEncoder().encode(sse([chunk('部分')]))) ;
+        if(mode==='heartbeat')interval=setInterval(()=>controller.enqueue(new TextEncoder().encode('event: ping\ndata: ping\n\n')),20);
+        signal.addEventListener('abort',()=>{clearInterval(interval);try{controller.error(signal.reason);}catch{}},{once:true});
+      },cancel(){clearInterval(interval);}}),{headers:{'content-type':'text/event-stream'}});
+    },async call=>{
+      const response=await call({...request,stream:mode==='partial'});
+      if(mode==='partial'){assert.equal(response.status,200);const body=await response.text();assert.match(body,/部分/);assert.match(body,/timeout/);}
+      else{assert.equal(response.status,504);assert.equal((await response.json()).error.code,'timeout');}
+      assert.equal(signal.aborted,true);
+    },{timeout:150,upstreamRetries:0});
+  }
+});
+
 test('反复切换四种模型默认会话互不复用，请求参数错误不会封锁模型',async()=>{
   const records=['chatglm','qwen-instruct','deepseek-pro','Kimi-k3'].map(aiType=>({aiType,rootAiType:'xinference',maxToken:524288}));
   const groups=new Set(),routes=[];let glmCalls=0;

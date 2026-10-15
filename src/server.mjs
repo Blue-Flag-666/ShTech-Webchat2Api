@@ -24,6 +24,7 @@ import { RequestLogger } from './request-log.mjs';
 import { normalizeUpstreamEvent, protocolFailure } from './upstream-sse.mjs';
 import { upstreamBusinessFailure, upstreamDiagnostic } from './upstream-errors.mjs';
 import { textHistoryRequest } from './upstream-history.mjs';
+import { withStreamTimeout } from './stream-timeout.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
 const GROUP_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-';
@@ -420,7 +421,7 @@ async function repairGeneratedOutput(fetcher,tokenManager,config,circuit,model,h
     excerptLimit=Math.max(512,Math.floor(excerptLimit/2));
   }
   let text='',reasoning='',last,seen=false,finished=false;
-  const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers:{...headers},body:JSON.stringify(correction),signal,redirect:'error'},tokenManager,config.upstreamRetries??2,undefined,config.debugUpstream?config:null,recovery),circuit,model,signal);
+  const source=guardedEvents(withStreamTimeout(authenticatedEvents(fetcher,{method:'POST',headers:{...headers},body:JSON.stringify(correction),signal,redirect:'error'},tokenManager,config.upstreamRetries??2,undefined,config.debugUpstream?config:null,recovery),config.timeout??120000),circuit,model,signal);
   for await(const item of source) {
     if(item.data==='[DONE]')break;
     if(item.event==='error')throw error(502,'修复请求收到上游错误事件');
@@ -966,7 +967,8 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         'x-access-token': accessToken, Origin: 'https://genai.shanghaitech.edu.cn',
         Referer: 'https://genai.shanghaitech.edu.cn/dashboard/analysis' };
       if (config.cookie) headers.Cookie = config.cookie;
-      const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config.upstreamRetries??2,()=>idempotency.dispatched(res),config.debugUpstream?config:null,recovery),circuit,selected.upstream_id||selected.id,controller.signal);
+      clearTimeout(timer);timer=undefined;
+      const source=guardedEvents(withStreamTimeout(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config.upstreamRetries??2,()=>idempotency.dispatched(res),config.debugUpstream?config:null,recovery),config.timeout??120000),circuit,selected.upstream_id||selected.id,controller.signal);
       // Even an SSE heartbeat commits HTTP headers and prevents a repair error
       // from being returned with its correct status before output is accepted.
       const sourceEvents=input.stream&&(policy||formatPolicy)&&!config.outputRepair?withHeartbeats(source):source;

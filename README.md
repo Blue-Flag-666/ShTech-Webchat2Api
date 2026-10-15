@@ -78,6 +78,8 @@ docker run -d --name shtech-webchat-api --restart unless-stopped --env-file .env
 
 旧会话遇到无说明的上游 500 时，服务会在输出前尝试一次文本历史兼容恢复，保留完整历史。可用 `GENAI_HISTORY_FALLBACK=false` 关闭；恢复仍受上下文和重试额度限制。
 
+`GENAI_TIMEOUT_MS` 默认 `120000`：生成阶段按连续无有效响应数据的时间计时，持续输出的长回答不会在两分钟后中断。
+
 源码部署可复制 `.env.example` 为 `.env`，填写凭证后执行 `docker compose up -d`。直接运行源码需要 Node.js 26+：
 
 ```bash
