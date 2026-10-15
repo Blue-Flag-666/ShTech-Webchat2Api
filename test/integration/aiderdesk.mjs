@@ -79,11 +79,13 @@ try{
   const profile={...template,id:'shtech-ci',name:'School CI',provider:'shtech',maxIterations:6,maxTokens:undefined,minTimeBetweenToolCalls:0,
     includeContextFiles:false,includeRepoMap:false,usePowerTools:true,useAiderTools:false,useTodoTools:false,useSubagents:false,useTaskTools:false,useMemoryTools:false,useSkillsTools:false,
     enabledServers:[],toolApprovals:approvals};
-  await api('/agent-profile/create','POST',{profile:{...profile,model:models[0].id}});
   for(selected of models){
     const directory=join(root,selected.id);await mkdir(directory);filePath=join(directory,'probe.txt');sentinel=`AIDER_READ_${randomUUID()}`;requests=0;await writeFile(filePath,sentinel);
-    await api('/agent-profile/update','POST',{profile:{...profile,model:selected.id}});
-    run=spawn('aiderdesk',['run','--port',String(port),'--format','json','--agent-profile','shtech-ci',`Read ${filePath}, overwrite it with the file_write tool, and report the result.`],{cwd:directory,env,detached:true,stdio:['ignore','pipe','pipe']});runClosed=closed(run);
+    // Never mutate a shared profile between CLI runs: the app can still be
+    // propagating the previous profile when the next task is created.
+    const profileId=`shtech-ci-${selected.id}`;
+    await api('/agent-profile/create','POST',{profile:{...profile,id:profileId,model:selected.id}});
+    run=spawn('aiderdesk',['run','--port',String(port),'--format','json','--agent-profile',profileId,`Read ${filePath}, overwrite it with the file_write tool, and report the result.`],{cwd:directory,env,detached:true,stdio:['ignore','pipe','pipe']});runClosed=closed(run);
     let stdout='',stderr='';run.stdout.on('data',bytes=>{stdout=(stdout+bytes.toString()).slice(-128*1024);});run.stderr.on('data',bytes=>{stderr=(stderr+bytes.toString()).slice(-32*1024);});
     const timeout=setTimeout(()=>stopGroup(run),180000);let exit;try{exit=await runClosed;}finally{clearTimeout(timeout);}
     assert.equal(exit.code,0,`AiderDesk failed (${exit.signal||exit.code})\n${stderr}\n${stdout}\n${appOutput}`);
