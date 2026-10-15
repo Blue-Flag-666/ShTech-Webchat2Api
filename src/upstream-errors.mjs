@@ -1,9 +1,28 @@
 const numericCode = value => /^(?:[1-9]\d{0,8}|0)$/.test(String(value ?? '')) ? Number(value) : undefined;
+const textFields = ['message', 'msg', 'errorMessage', 'error_description', 'detail'];
+function errorTexts(value, depth = 0) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 3 || value.choices) return [];
+  const texts = textFields.flatMap(key => typeof value[key] === 'string' && value[key] ? [value[key]] : []);
+  if (typeof value.error === 'string') texts.push(value.error);
+  for (const key of ['error', 'result', 'data']) texts.push(...errorTexts(value[key], depth + 1));
+  return texts;
+}
+
+export function upstreamDiagnostic(value, secrets = []) {
+  const redact = text => {
+    for (const secret of [...secrets].filter(item => typeof item === 'string' && item.length >= 4).sort((a,b)=>b.length-a.length)) text = text.split(secret).join('[redacted]');
+    text = text.replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted]')
+      .replace(/\bBearer\s+[^\s"',;}]+/gi, 'Bearer [redacted]')
+      .replace(/(["']?(?:x-access-token|authorization|cookie|password|api[_-]?key|token|username)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, '$1[redacted]');
+    return text.slice(0, 1024);
+  };
+  return { business_code: numericCode(value?.code ?? value?.error?.code) ?? null,
+    errors: errorTexts(value).slice(0, 4).map(redact) };
+}
 
 export function upstreamBusinessFailure(value, model) {
   const code = numericCode(value?.code ?? value?.error?.code);
-  const raw = typeof value?.message === 'string' ? value.message : typeof value?.msg === 'string' ? value.msg
-    : typeof value?.error?.message === 'string' ? value.error.message : typeof value?.error === 'string' ? value.error : '';
+  const raw = errorTexts(value).join('\n');
   let status = [401, 403, 429, 502, 503, 504].includes(code) ? code : 502;
   let category = 'unknown', hint = '上游未能完成请求';
   if (code === 401 || /token.*(?:失效|过期|expired|invalid)|请重新登录|登录已过期|unauthorized/i.test(raw)) {
@@ -16,7 +35,7 @@ export function upstreamBusinessFailure(value, model) {
     status = 400; category = 'invalid_request'; hint = '上游不接受请求参数或模型配置';
   } else if (/额度|余额|quota|balance/i.test(raw)) {
     status = 429; category = 'quota'; hint = '上游额度不足';
-  } else if (code === 429 || /限流|too many requests|rate.?limit/i.test(raw)) {
+  } else if (code === 429 || /限流|请求.{0,8}(?:频繁|过快|超频)|并发.{0,8}(?:超限|超过)|too many requests|rate.?limit/i.test(raw)) {
     status = 429; category = 'rate_limit'; hint = '上游请求频率或并发超限';
   } else if (code === 503 || /繁忙|排队|overload|busy|temporarily unavailable|服务.{0,12}(?:不可用|维护)/i.test(raw)) {
     status = 503; category = 'busy'; hint = '上游服务繁忙或暂时不可用';

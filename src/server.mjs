@@ -22,7 +22,7 @@ import { Metrics } from './metrics.mjs';
 import { IdempotencyStore } from './idempotency.mjs';
 import { RequestLogger } from './request-log.mjs';
 import { normalizeUpstreamEvent, protocolFailure } from './upstream-sse.mjs';
-import { upstreamBusinessFailure } from './upstream-errors.mjs';
+import { upstreamBusinessFailure, upstreamDiagnostic } from './upstream-errors.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
 const GROUP_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-';
@@ -36,6 +36,7 @@ export function configuration(env = process.env) {
     username: secret(env,'GENAI_USERNAME'), password: secret(env,'GENAI_PASSWORD'),
     group: env.GENAI_CHAT_GROUP_ID || '', key: secret(env,'API_KEY'), uploadToken:secret(env,'GENAI_UPLOAD_TOKEN'),
     startupCheck: env.GENAI_STARTUP_CHECK !== 'false',
+    debugUpstream: env.GENAI_DEBUG_UPSTREAM === 'true',
     netGo: bool(env.GENAI_NET_GO), timeout: Number(env.GENAI_TIMEOUT_MS || 120000), modelTtl: Number(env.GENAI_MODEL_TTL_MS || 300000),logFile:env.GENAI_LOG_FILE || '',
     concurrency:Number(env.GENAI_CONCURRENCY || 1),queueSize:Number(env.GENAI_QUEUE_SIZE || 32),queueTimeout:Number(env.GENAI_QUEUE_TIMEOUT_MS || 120000),modelLimits:modelLimitsConfig(env.GENAI_MODEL_LIMITS),
     requestLimit:Number(env.GENAI_REQUEST_LIMIT_MB || 144)*1024*1024,
@@ -284,12 +285,13 @@ function upstreamBackoff(status,attempt) {
 }
 const retryableNetworkCodes=new Set(['ECONNRESET','ECONNREFUSED','ECONNABORTED','EPIPE','ETIMEDOUT','EAI_AGAIN','EHOSTUNREACH','ENETUNREACH','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_CONNECT_TIMEOUT','UND_ERR_SOCKET']);
 const retryableNetworkError=cause=>retryableNetworkCodes.has(cause?.code??cause?.cause?.code);
-async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, onDispatch) {
+async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, onDispatch, diagnostics) {
   let renewed=false,attempt=0;
-  const model=JSON.parse(options.body).aiType;
+  const request=JSON.parse(options.body),model=request.aiType,trace=randomUUID().slice(0,8);
+  let dispatches=0;
   while(true) {
     let response;
-    try{onDispatch?.();response=await fetcher(UPSTREAM,options);}catch(cause){
+    try{dispatches++;onDispatch?.();response=await fetcher(UPSTREAM,options);}catch(cause){
       if(options.signal?.aborted||!retryableNetworkError(cause)||attempt>=retries)throw cause;
       await delay(upstreamBackoff(502,attempt++),options.signal);
       continue;
@@ -328,6 +330,10 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
         if(value?.error||value?.success===false||Number(value?.code)>=400){
           const failure=upstreamBusinessFailure(value,model);
           console.warn(`[上游业务] ${failure.message}`);
+          if(diagnostics)console.warn(`[上游诊断] ${JSON.stringify({trace,attempt:dispatches,model,category:failure.category,
+            max_output_tokens:request.maxToken,history_messages:request.messages?.length??0,
+            thinking:request.thinking??null,session:diagnostics.group?'configured':'per-request',
+            ...upstreamDiagnostic(value,[diagnostics.key,diagnostics.cookie,tokenManager.username,tokenManager.password,tokenManager.token,options.headers['x-access-token']])})}`);
           if(failure.status===401&&!emitted&&!renewed&&tokenManager.renewable){retry=true;break;}
           if(!emitted&&[502,503,504].includes(failure.status)&&attempt<retries){retryFailure=failure;break;}
           throw failure;
@@ -397,7 +403,7 @@ async function repairGeneratedOutput(fetcher,tokenManager,config,circuit,model,h
     excerptLimit=Math.max(512,Math.floor(excerptLimit/2));
   }
   let text='',reasoning='',last,seen=false,finished=false;
-  const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers:{...headers},body:JSON.stringify(correction),signal,redirect:'error'},tokenManager,config.upstreamRetries??2),circuit,model,signal);
+  const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers:{...headers},body:JSON.stringify(correction),signal,redirect:'error'},tokenManager,config.upstreamRetries??2,undefined,config.debugUpstream?config:null),circuit,model,signal);
   for await(const item of source) {
     if(item.data==='[DONE]')break;
     if(item.event==='error')throw error(502,'修复请求收到上游错误事件');
@@ -941,7 +947,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         'x-access-token': accessToken, Origin: 'https://genai.shanghaitech.edu.cn',
         Referer: 'https://genai.shanghaitech.edu.cn/dashboard/analysis' };
       if (config.cookie) headers.Cookie = config.cookie;
-      const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config.upstreamRetries??2,()=>idempotency.dispatched(res)),circuit,selected.upstream_id||selected.id,controller.signal);
+      const source=guardedEvents(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config.upstreamRetries??2,()=>idempotency.dispatched(res),config.debugUpstream?config:null),circuit,selected.upstream_id||selected.id,controller.signal);
       // Even an SSE heartbeat commits HTTP headers and prevents a repair error
       // from being returned with its correct status before output is accepted.
       const sourceEvents=input.stream&&(policy||formatPolicy)&&!config.outputRepair?withHeartbeats(source):source;

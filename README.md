@@ -74,6 +74,8 @@ docker run -d --name shtech-webchat-api --restart unless-stopped --env-file .env
 
 启动时会检查学校登录及模型访问权限，可用 `docker logs -f shtech-webchat-api` 查看结果。检查失败会记录原因，后续请求仍可重试登录。
 
+排查笼统的上游业务错误时，可临时设置 `GENAI_DEBUG_UPSTREAM=true`，查看 `[上游诊断]` 中的脱敏错误字段；排查后关闭。
+
 源码部署可复制 `.env.example` 为 `.env`，填写凭证后执行 `docker compose up -d`。直接运行源码需要 Node.js 26+：
 
 ```bash

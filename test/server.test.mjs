@@ -401,6 +401,27 @@ test('SSE 业务繁忙在输出前按预算重试，输出后不重放',async()=
   },{upstreamRetries:2,timeout:5000});
   assert.equal(attempts,1);
 });
+
+test('上游诊断默认关闭，显式开启时只记录脱敏错误字段和重试标识',async()=>{
+  const original=console.warn,lines=[];console.warn=(...values)=>lines.push(values.join(' '));
+  try{
+    for(const debugUpstream of [false,true]){
+      lines.length=0;
+      await withServer(async()=>new Response(sse([{success:false,code:500,message:`backend failure ${config.key} ${config.token}`}]),{headers:{'content-type':'text/event-stream'}}),async call=>{
+        const response=await call({...request,messages:[{role:'user',content:'private prompt contents'}]});
+        assert.equal(response.status,502);await response.json();
+        const diagnostic=lines.filter(line=>line.startsWith('[上游诊断]'));
+        assert.equal(diagnostic.length,debugUpstream?1:0);
+        if(debugUpstream){
+          const value=JSON.parse(diagnostic[0].slice('[上游诊断] '.length));
+          assert.equal(value.business_code,500);assert.equal(value.model,'qwen-instruct');assert.equal(value.attempt,1);
+          assert.match(value.errors[0],/backend failure/);
+          assert.doesNotMatch(diagnostic[0],/local-test|upstream-test|private prompt contents/);
+        }
+      },{debugUpstream,upstreamRetries:0});
+    }
+  }finally{console.warn=original;}
+});
 test('未配置会话 ID 时每个请求生成网页式 ID，显式 ID 保持不变',async()=>{
   const groups=[];
   await withServer(async(_url,options)=>{
