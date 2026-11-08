@@ -8,7 +8,6 @@ import { normalizeRequest, ProtocolOutput } from './protocols.mjs';
 import { shutdown } from './lifecycle.mjs';
 import { outputPolicy, outputPrompt, parseStructured } from './structured.mjs';
 import { RequestQueue } from './queue.mjs';
-import { UpstreamCircuit } from './circuit.mjs';
 import { extractImages, retainedImages, prepareImages } from './images.mjs';
 import { openReasoning } from './reasoning-state.mjs';
 import { uploadNativeFiles } from './native-files.mjs';
@@ -22,7 +21,7 @@ import { Metrics } from './metrics.mjs';
 import { IdempotencyStore } from './idempotency.mjs';
 import { RequestLogger } from './request-log.mjs';
 import { normalizeUpstreamEvent, protocolFailure } from './upstream-sse.mjs';
-import { upstreamBusinessFailure, upstreamDiagnostic } from './upstream-errors.mjs';
+import { upstreamBusinessFailure, upstreamHttpFailure, upstreamDiagnostic } from './upstream-errors.mjs';
 import { textHistoryRequest } from './upstream-history.mjs';
 import { withStreamTimeout } from './stream-timeout.mjs';
 
@@ -47,7 +46,7 @@ export function configuration(env = process.env) {
     fileStoreSize:Number(env.GENAI_FILE_STORE_SIZE || 32),fileStoreTtl:Number(env.GENAI_FILE_STORE_TTL_MS || 3600000),fileMaxBytes:Number(env.GENAI_FILE_MAX_MB || 10)*1024*1024,pdfMaxPages:Number(env.GENAI_PDF_MAX_PAGES || 200),nativeFileUpload:bool(env.GENAI_NATIVE_FILE_UPLOAD),
     batchStoreSize:Number(env.GENAI_BATCH_STORE_SIZE || 32),batchStoreTtl:Number(env.GENAI_BATCH_STORE_TTL_MS || 3600000),
     vectorStoreSize:Number(env.GENAI_VECTOR_STORE_SIZE || 32),vectorStoreTtl:Number(env.GENAI_VECTOR_STORE_TTL_MS || 3600000),vectorStoreMaxFiles:Number(env.GENAI_VECTOR_STORE_MAX_FILES || 100),
-    upstreamRetries:Number(env.GENAI_UPSTREAM_RETRIES ?? 2),breakerFailures:Number(env.GENAI_BREAKER_FAILURES ?? 3),breakerCooldown:Number(env.GENAI_BREAKER_COOLDOWN_MS ?? 30000),outputRepair:bool(env.GENAI_OUTPUT_REPAIR),contextAuto:env.GENAI_CONTEXT_AUTO!=='false',contextStrategy:env.GENAI_CONTEXT_STRATEGY || 'agent',corsOrigin:env.CORS_ORIGIN || '',dataDir:env.GENAI_DATA_DIR || '',dataQuotaBytes:Number(env.GENAI_DATA_QUOTA_MB||0)*1024*1024 };
+    upstreamRetries:Number(env.GENAI_UPSTREAM_RETRIES ?? 2),outputRepair:bool(env.GENAI_OUTPUT_REPAIR),contextAuto:env.GENAI_CONTEXT_AUTO!=='false',contextStrategy:env.GENAI_CONTEXT_STRATEGY || 'agent',corsOrigin:env.CORS_ORIGIN || '',dataDir:env.GENAI_DATA_DIR || '',dataQuotaBytes:Number(env.GENAI_DATA_QUOTA_MB||0)*1024*1024 };
 }
 
 export function upstreamBody(input, config, supportedModels, formatPolicy=null,media={}) {
@@ -291,6 +290,7 @@ const retryableNetworkError=cause=>retryableNetworkCodes.has(cause?.code??cause?
 async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, onDispatch, diagnostics, recovery) {
   let renewed=false,attempt=0;
   const request=JSON.parse(options.body),model=request.aiType,trace=randomUUID().slice(0,8);
+  const secrets=()=>[diagnostics?.key,diagnostics?.cookie,diagnostics?.uploadToken,diagnostics?.token,tokenManager.username,tokenManager.password,tokenManager.token,options.headers['x-access-token'],options.headers.Cookie];
   let dispatches=0,historyRecovered=false;
   while(true) {
     let response;
@@ -304,14 +304,13 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
       options.headers['x-access-token']=await refreshRejectedToken(tokenManager,options.headers['x-access-token'],options.signal);renewed=true;continue;
     }
     const serverDelay=parseRetryAfter(response.headers.get('retry-after'));
-    if([429,502,503,504].includes(response.status)&&attempt<retries){
+    if([429,500,502,503,504].includes(response.status)&&attempt<retries){
       const pause=serverDelay??upstreamBackoff(response.status,attempt);
       if(pause<=30000){attempt++;await response.body?.cancel();await delay(pause,options.signal);continue;}
     }
     if(!response.ok) {
-      await response.body?.cancel();
-      const status=[401,403,429,502,503,504].includes(response.status)?response.status:502;
-      const failure=error(status,`上游 HTTP ${response.status}`);
+      const status=response.status;
+      const failure=await upstreamHttpFailure(response,model,secrets());
       if(serverDelay!==null&&[429,502,503,504].includes(status))failure.retryAfter=Math.max(1,Math.ceil(serverDelay/1000));
       throw failure;
     }
@@ -321,8 +320,11 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
     let emitted=false,retry=false,retryFailure,seenChoice=false,finished=false,pending=[],pendingBytes=0,ignored=0;
     try{
       for await(const rawItem of events(response.body)) {
-        if(rawItem.event==='error')throw error(502,'上游返回错误事件');
-        const item=normalizeUpstreamEvent(rawItem);
+        let item;
+        if(rawItem.event==='error'){
+          let failure;try{failure=JSON.parse(rawItem.data);}catch{failure={message:rawItem.data};}
+          item={event:'message',data:JSON.stringify({error:failure})};
+        }else item=normalizeUpstreamEvent(rawItem);
         if(!item){if(++ignored>1024)throw protocolFailure('上游发送过多 SSE 控制消息');continue;}
         if(item.data==='[DONE]'){
           if(!seenChoice)throw error(502,'上游 SSE 缺少响应选择项');
@@ -331,16 +333,16 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
         if(item.event==='error')throw error(502,'上游返回错误事件');
         let value;try{value=JSON.parse(item.data);}catch{throw error(502,'上游 SSE 包含无效 JSON');}
         if(value?.error||value?.success===false||Number(value?.code)>=400){
-          const failure=upstreamBusinessFailure(value,model);
+          const failure=upstreamBusinessFailure(value,model,secrets());
           console.warn(`[上游业务] ${failure.message}`);
-          if(diagnostics)console.warn(`[上游诊断] ${JSON.stringify({trace,attempt:dispatches,model,category:failure.category,
+          if(diagnostics?.debugUpstream)console.warn(`[上游诊断] ${JSON.stringify({trace,attempt:dispatches,model,category:failure.category,
             max_output_tokens:request.maxToken,history_messages:request.messages?.length??0,
             history_mode:historyRecovered?'text':'structured',
             estimated_input_tokens:estimateTokens({messages:request.messages,chatInfo:request.chatInfo}),
             history_roles:request.messages.map(message=>['system','user','assistant'].includes(message.role)?message.role:'other'),
             thinking:request.thinking??null,session:diagnostics.group?'configured':'per-request',
             ...upstreamDiagnostic(value,[diagnostics.key,diagnostics.cookie,tokenManager.username,tokenManager.password,tokenManager.token,options.headers['x-access-token']])})}`);
-          if(failure.status===401&&!emitted&&!renewed&&tokenManager.renewable){retry=true;break;}
+          if(failure.category==='authentication'&&!emitted&&!renewed&&tokenManager.renewable){retry=true;break;}
           if(!emitted&&failure.category==='unknown'&&Number(value.code??value.error?.code)===500&&recovery&&request.messages.length){
             const group=recovery.resetSession&&!request.fileIds?.length?newChatGroupId():request.chatGroupId;
             const fallback=textHistoryRequest(request,group);
@@ -353,7 +355,7 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
             throw failure;
           }
           if(historyRecovered&&failure.category==='unknown')throw failure;
-          if(!emitted&&[502,503,504].includes(failure.status)&&attempt<retries){retryFailure=failure;break;}
+          if(!emitted&&['unknown','busy','timeout'].includes(failure.category)&&[500,502,503,504].includes(failure.status)&&attempt<retries){retryFailure=failure;break;}
           throw failure;
         }
         if(!Array.isArray(value?.choices)&&value?.other===undefined&&value?.usage===undefined)throw protocolFailure('未知上游 SSE 格式');
@@ -392,19 +394,7 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
     options.headers['x-access-token']=await refreshRejectedToken(tokenManager,options.headers['x-access-token'],options.signal);renewed=true;
   }
 }
-export async function* guardedEvents(source,circuit,model,signal) {
-  const retryAfter=circuit.enter(model);
-  if(retryAfter){const failure=error(503,`模型 ${model} 的上游暂时不可用`);failure.retryAfter=retryAfter;throw failure;}
-  let failed=false,completed=false;
-  try{yield* source;completed=true;}
-  catch(cause){
-    failed=true;
-    if(!signal?.aborted&&!cause.upstreamProtocol&&(!cause.status||[502,503,504].includes(cause.status)))circuit.failure(model);
-    else circuit.release(model);
-    throw cause;
-  }finally{if(!failed){if(completed)circuit.success(model);else circuit.release(model);}}
-}
-async function repairGeneratedOutput(fetcher,tokenManager,config,circuit,model,headers,body,invalidText,reason,policy,formatPolicy,signal,contextWindow,recovery) {
+async function repairGeneratedOutput(fetcher,tokenManager,config,model,headers,body,invalidText,reason,policy,formatPolicy,signal,contextWindow,recovery) {
   const prompt=[`The previous answer failed validation: ${String(reason).slice(0,500)}. Correct it and return the complete answer again.`,
     policy?toolPrompt(policy):outputPrompt(formatPolicy)].filter(Boolean).join('\n\n');
   const correction={...body,chatInfo:prompt};
@@ -421,7 +411,7 @@ async function repairGeneratedOutput(fetcher,tokenManager,config,circuit,model,h
     excerptLimit=Math.max(512,Math.floor(excerptLimit/2));
   }
   let text='',reasoning='',last,seen=false,finished=false;
-  const source=guardedEvents(withStreamTimeout(authenticatedEvents(fetcher,{method:'POST',headers:{...headers},body:JSON.stringify(correction),signal,redirect:'error'},tokenManager,config.upstreamRetries??2,undefined,config.debugUpstream?config:null,recovery),config.timeout??120000),circuit,model,signal);
+  const source=withStreamTimeout(authenticatedEvents(fetcher,{method:'POST',headers:{...headers},body:JSON.stringify(correction),signal,redirect:'error'},tokenManager,config.upstreamRetries??2,undefined,config,recovery),config.timeout??120000);
   for await(const item of source) {
     if(item.data==='[DONE]')break;
     if(item.event==='error')throw error(502,'修复请求收到上游错误事件');
@@ -452,7 +442,6 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
   const metrics=new Metrics();
   const idempotency=new IdempotencyStore();
   const requestLogger=new RequestLogger(config.logFile||'');
-  const circuit=new UpstreamCircuit(config.breakerFailures??3,config.breakerCooldown??30000);
   const responseStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000);
   const conversationStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'对话',persisted('conversations'));
   const compactionStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'压缩状态');
@@ -968,7 +957,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         Referer: 'https://genai.shanghaitech.edu.cn/dashboard/analysis' };
       if (config.cookie) headers.Cookie = config.cookie;
       clearTimeout(timer);timer=undefined;
-      const source=guardedEvents(withStreamTimeout(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config.upstreamRetries??2,()=>idempotency.dispatched(res),config.debugUpstream?config:null,recovery),config.timeout??120000),circuit,selected.upstream_id||selected.id,controller.signal);
+      const source=withStreamTimeout(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config.upstreamRetries??2,()=>idempotency.dispatched(res),config,recovery),config.timeout??120000);
       // Even an SSE heartbeat commits HTTP headers and prevents a repair error
       // from being returned with its correct status before output is accepted.
       const sourceEvents=input.stream&&(policy||formatPolicy)&&!config.outputRepair?withHeartbeats(source):source;
@@ -1112,7 +1101,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         parsed=validateOutput(parsed);
       }catch(cause){
         if(!config.outputRepair||cause.status!==502||res.headersSent||!policy&&!formatPolicy)throw cause;
-        const repair=await repairGeneratedOutput(fetcher,tokenManager,config,circuit,selected.upstream_id||selected.id,headers,body,nativePayload||bufferedText,cause.message,policy,formatPolicy,controller.signal,contextWindow,recovery);
+        const repair=await repairGeneratedOutput(fetcher,tokenManager,config,selected.upstream_id||selected.id,headers,body,nativePayload||bufferedText,cause.message,policy,formatPolicy,controller.signal,contextWindow,recovery);
         parsed=validateOutput(parseToolCalls(repair.text,policy,makeCallId));
         repaired=true;repairPromptBytes=repair.promptBytes;responseBytes+=Buffer.byteLength(repair.text)+Buffer.byteLength(repair.reasoning);
         reasoning=suppressReasoning?'':repair.reasoning;
@@ -1216,8 +1205,6 @@ export function startServer(config = configuration()) {
   if (!Number.isFinite(config.vectorStoreTtl) || config.vectorStoreTtl < 3600000 || config.vectorStoreTtl > 31536000000) throw new Error('GENAI_VECTOR_STORE_TTL_MS 必须为 1 小时–365 天');
   if (!Number.isInteger(config.vectorStoreMaxFiles) || config.vectorStoreMaxFiles < 1 || config.vectorStoreMaxFiles > 10000) throw new Error('GENAI_VECTOR_STORE_MAX_FILES 必须为 1–10000 的整数');
   if (!Number.isInteger(config.upstreamRetries) || config.upstreamRetries < 0 || config.upstreamRetries > 5) throw new Error('GENAI_UPSTREAM_RETRIES 必须为 0–5 的整数');
-  if (!Number.isInteger(config.breakerFailures) || config.breakerFailures < 1 || config.breakerFailures > 100) throw new Error('GENAI_BREAKER_FAILURES 必须为 1–100 的整数');
-  if (!Number.isInteger(config.breakerCooldown) || config.breakerCooldown < 1000 || config.breakerCooldown > 3600000) throw new Error('GENAI_BREAKER_COOLDOWN_MS 必须为 1000–3600000 的整数');
   if (typeof config.contextAuto!=='boolean') throw new Error('GENAI_CONTEXT_AUTO 必须为布尔值');
   if (!['agent','recent'].includes(config.contextStrategy)) throw new Error('GENAI_CONTEXT_STRATEGY 必须为 agent 或 recent');
   if (config.corsOrigin && config.corsOrigin!=='*') { let origin;try{origin=new URL(config.corsOrigin);}catch{throw new Error('CORS_ORIGIN 必须是完整来源或 *');}if(origin.origin!==config.corsOrigin)throw new Error('CORS_ORIGIN 只能包含协议、主机和端口'); }

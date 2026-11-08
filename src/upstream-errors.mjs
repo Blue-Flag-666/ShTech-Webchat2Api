@@ -20,7 +20,7 @@ export function upstreamDiagnostic(value, secrets = []) {
     errors: errorTexts(value).slice(0, 4).map(redact) };
 }
 
-export function upstreamBusinessFailure(value, model) {
+export function upstreamBusinessFailure(value, model, secrets = []) {
   const code = numericCode(value?.code ?? value?.error?.code);
   const raw = errorTexts(value).join('\n');
   let status = [401, 403, 429, 502, 503, 504].includes(code) ? code : 502;
@@ -42,7 +42,33 @@ export function upstreamBusinessFailure(value, model) {
   } else if (code === 504 || /超时|timed?\s*out|timeout/i.test(raw)) {
     status = 504; category = 'timeout'; hint = '上游处理超时';
   }
-  const failure = Object.assign(new Error(`${hint}（模型 ${model}，上游业务码 ${code ?? '未提供'}，分类 ${category}）`), { status, category });
-  if (category === 'context_length_exceeded') failure.code = category;
+  // Classification guides recovery, but must not replace an explicit upstream status.
+  if (code >= 400 && code <= 599) status = code;
+  const messages = upstreamDiagnostic(value, secrets).errors;
+  const failure = Object.assign(new Error(messages.join('; ') || `${hint}（模型 ${model}，上游业务码 ${code ?? '未提供'}，分类 ${category}）`), { status, category });
+  if (code !== undefined) failure.code = code;
+  else if (category === 'context_length_exceeded') failure.code = category;
+  return failure;
+}
+
+export async function upstreamHttpFailure(response, model, secrets = []) {
+  const reader = response.body?.getReader(), pieces = [];
+  let size = 0;
+  try {
+    while (reader && size < 16384) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      const piece = value.subarray(0, 16384 - size);
+      pieces.push(piece); size += piece.length;
+    }
+  } finally { if (reader) { void reader.cancel().catch(()=>{}); reader.releaseLock(); } }
+  const text = Buffer.concat(pieces).toString('utf8');
+  let value;
+  try { value = JSON.parse(text); } catch { value = {message:text}; }
+  const diagnostic = upstreamDiagnostic(value, secrets);
+  const failure = Object.assign(new Error(diagnostic.errors.join('; ') || `上游 HTTP ${response.status}`), {status:response.status});
+  const code = value?.error?.code ?? value?.code;
+  if (typeof code === 'number' || typeof code === 'string') failure.code = upstreamDiagnostic({message:String(code)}, secrets).errors[0];
+  if (typeof code === 'number' && Number.isFinite(code)) failure.code = code;
   return failure;
 }

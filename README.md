@@ -74,7 +74,7 @@ docker run -d --name shtech-webchat-api --restart unless-stopped --env-file .env
 
 启动时会检查学校登录及模型访问权限，可用 `docker logs -f shtech-webchat-api` 查看结果。检查失败会记录原因，后续请求仍可重试登录。
 
-排查笼统的上游业务错误时，可临时设置 `GENAI_DEBUG_UPSTREAM=true`，查看 `[上游诊断]` 中的脱敏错误字段；排查后关闭。
+上游错误保留实际 HTTP 状态码、业务错误码和脱敏错误信息，不会因之前的失败熔断模型。需要进一步诊断时，可临时设置 `GENAI_DEBUG_UPSTREAM=true`，查看 `[上游诊断]` 中的脱敏错误字段；排查后关闭。
 
 旧会话遇到无说明的上游 500 时，服务会在输出前尝试一次文本历史兼容恢复，保留完整历史。可用 `GENAI_HISTORY_FALLBACK=false` 关闭；恢复仍受上下文和重试额度限制。
 

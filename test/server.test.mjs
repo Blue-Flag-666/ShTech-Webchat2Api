@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { createServer, events, upstreamBody, manageContextMessages, parseRetryAfter, guardedEvents } from '../src/server.mjs';
-import { UpstreamCircuit } from '../src/circuit.mjs';
+import { createServer, events, upstreamBody, manageContextMessages, parseRetryAfter } from '../src/server.mjs';
 import { TokenManager } from '../src/auth.mjs';
 import { listenForFetch, confirmedModels } from './fixtures.mjs';
 
@@ -34,31 +33,6 @@ test('无 v1 前缀的兼容路径保留鉴权、模型预算和跨路径幂等'
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
 
-test('提前结束半开探测流不会清除熔断故障记录',async()=>{
-  let now=1000,closed=false;
-  const circuit=new UpstreamCircuit(1,1000,()=>now);
-  circuit.failure('kimi-k3');now+=1000;
-  const source=(async function*(){try{yield 'first';yield 'last';}finally{closed=true;}})();
-  const probe=guardedEvents(source,circuit,'kimi-k3');
-  assert.deepEqual(await probe.next(),{value:'first',done:false});
-  await probe.return();
-  assert.equal(closed,true);
-  assert.equal(circuit.enter('kimi-k3'),1);
-  assert.equal(circuit.enter('qwen-instruct'),0);
-  now+=1000;
-  const recovered=guardedEvents((async function*(){yield 'complete';})(),circuit,'kimi-k3');
-  assert.deepEqual(await Array.fromAsync(recovered),['complete']);
-  assert.equal(circuit.states.has('kimi-k3'),false);
-});
-
-test('提前结束普通流会保留未达到阈值的故障记录',async()=>{
-  const circuit=new UpstreamCircuit(2,1000);
-  circuit.failure('kimi-k3');
-  const source=guardedEvents((async function*(){yield 'first';yield 'last';})(),circuit,'kimi-k3');
-  await source.next();await source.return();
-  circuit.failure('kimi-k3');
-  assert.ok(circuit.enter('kimi-k3')>0);
-});
 test('上下文截断保留完整工具轮次、最近请求和关键错误',()=>{
   const messages=[
     {role:'system',content:'必须遵守仓库规则'},
@@ -236,23 +210,43 @@ test('上游 502、503、504 的等待时间透传给客户端',async()=>{
     assert.equal(attempts,1);
   }
 });
-test('连续上游故障触发按模型熔断并返回等待时间',async()=>{
+test('连续上游故障不熔断，每次请求都返回上游实际错误并能立即恢复',async()=>{
   let attempts=0;
-  await withServer(async()=>{attempts++;return new Response('',{status:503});},async call=>{
-    assert.equal((await call()).status,503);
-    assert.equal((await call()).status,503);
-    const blocked=await call();assert.equal(blocked.status,503);assert.equal(blocked.headers.get('retry-after'),'1');
-  },{upstreamRetries:0,breakerFailures:2,breakerCooldown:1000});
-  assert.equal(attempts,2);
+  await withServer(async()=>++attempts<=5?new Response(JSON.stringify({error:{code:'backend_unavailable',message:'worker restarting'}}),{status:503,headers:{'content-type':'application/json'}}):new Response(sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
+    for(let i=0;i<5;i++){
+      const response=await call();assert.equal(response.status,503);
+      assert.equal(response.headers.get('retry-after'),null);
+      const value=await response.json();assert.equal(value.error.message,'worker restarting');assert.equal(value.error.code,'backend_unavailable');
+    }
+    const recovered=await call();assert.equal(recovered.status,200);assert.equal((await recovered.json()).choices[0].message.content,'恢复');
+  },{upstreamRetries:0});
+  assert.equal(attempts,6);
 });
-test('协议格式错误不会将健康模型熔断，下一次正常响应可恢复',async()=>{
+test('HTTP 错误与 SSE 业务错误在三个协议中保留上游状态、错误码及脱敏消息',async()=>{
+  for(const transport of ['http','sse','event'])await withServer(async()=>{
+    const value={code:500,message:`backend refused ${config.key} ${config.token}`};
+    if(transport==='http')return new Response(JSON.stringify(value),{status:500,headers:{'content-type':'application/json'}});
+    return new Response(transport==='event'?`event: error\ndata: ${JSON.stringify(value)}\n\n`:sse([value]),{headers:{'content-type':'text/event-stream'}});
+  },async(_call,base)=>{
+    for(const [path,body] of [
+      ['/v1/chat/completions',request],
+      ['/v1/responses',{model:request.model,input:'hello'}],
+      ['/v1/messages',{model:request.model,messages:request.messages,max_tokens:50}]
+    ]){
+      const response=await fetch(base+path,{method:'POST',headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json'},body:JSON.stringify(body)});
+      assert.equal(response.status,500);const value=await response.json();assert.equal(value.error.code,500);
+      assert.equal(value.error.message,'backend refused [redacted] [redacted]');
+    }
+  },{upstreamRetries:0});
+});
+test('协议格式错误后下一次请求仍可正常响应',async()=>{
   let attempts=0;
   await withServer(async()=>new Response(++attempts<=2?'data: not-json\n\n':sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
     assert.equal((await call()).status,502);
     assert.equal((await call()).status,502);
     const recovered=await call();assert.equal(recovered.status,200);
     assert.equal((await recovered.json()).choices[0].message.content,'恢复');
-  },{upstreamRetries:0,breakerFailures:2,breakerCooldown:1000});
+  },{upstreamRetries:0});
   assert.equal(attempts,3);
 });
 
@@ -282,7 +276,7 @@ test('包装中的 SSE 401 可刷新登录，业务 503 不会被当作心跳忽
   assert.equal(logins,1);assert.equal(attempts,2);
   await withServer(async()=>new Response(sse([{success:true,result:{code:503,message:'private server message'}}]),{headers:{'content-type':'text/event-stream'}}),async call=>{
     const response=await call();assert.equal(response.status,503);
-    assert.doesNotMatch((await response.json()).error.message,/private/);
+    assert.match((await response.json()).error.message,/private server message/);
   },{upstreamRetries:0});
 });
 
@@ -306,14 +300,14 @@ test('首个输出前协议错误最多重试一次，输出后不重放',async(
   },{upstreamRetries:2,timeout:5000});
   assert.equal(attempts,1);
 });
-test('缺少完成标记的 SSE 被计入模型熔断',async()=>{
+test('连续缺少完成标记的 SSE 每次都返回真实流错误',async()=>{
   let attempts=0;
   await withServer(async()=>{attempts++;return new Response(sse([chunk('未完成')]),{headers:{'content-type':'text/event-stream'}});},async call=>{
     assert.equal((await call()).status,502);
     assert.equal((await call()).status,502);
-    assert.equal((await call()).status,503);
-  },{upstreamRetries:0,breakerFailures:2,breakerCooldown:1000});
-  assert.equal(attempts,2);
+    assert.equal((await call()).status,502);
+  },{upstreamRetries:0});
+  assert.equal(attempts,3);
 });
 test('模型专属队列让其他模型在空闲全局槽位继续运行',async()=>{
   let releaseKimi,markStarted,kimiCalls=0;
@@ -394,10 +388,10 @@ test('反复切换四种模型默认会话互不复用，请求参数错误不�
     for(let round=0;round<3;round++)for(const model of ['chatglm','qwen-instruct','deepseek-pro','kimi-k3']){
       const response=await call({model,messages:[{role:'user',content:'之前的问题'},{role:'assistant',content:'之前模型的回答'},{role:'user',content:'继续'}]});
       const value=await response.json();
-      if(model==='chatglm'&&round<2){assert.equal(response.status,400);assert.match(value.error.message,/业务码 500/);assert.match(value.error.message,/invalid_request/);assert.doesNotMatch(value.error.message,/private/);}
+      if(model==='chatglm'&&round<2){assert.equal(response.status,500);assert.equal(value.error.code,500);assert.match(value.error.message,/参数不合法 private details/);}
       else{assert.equal(response.status,200);assert.equal(value.choices[0].message.content,model==='kimi-k3'?'Kimi-k3':model);}
     }
-  },{group:'',breakerFailures:1,upstreamRetries:0,modelFetcher:async()=>({success:true,result:{records}})});
+  },{group:'',upstreamRetries:0,modelFetcher:async()=>({success:true,result:{records}})});
   assert.equal(groups.size,12);assert.deepEqual(routes,Array.from({length:3},()=>records.map(record=>record.aiType)).flat());
 });
 
@@ -434,7 +428,7 @@ test('SSE 业务繁忙在输出前按预算重试，输出后不重放',async()=
   assert.equal(attempts,2);attempts=0;
   await withServer(async()=>{attempts++;return new Response(sse([chunk('部分'),busy]),{headers:{'content-type':'text/event-stream'}});},async call=>{
     const response=await call({...request,stream:true}),body=await response.text();
-    assert.match(body,/部分/);assert.match(body,/业务码 500/);assert.doesNotMatch(body,/private/);
+    assert.match(body,/部分/);assert.match(body,/"code":500/);assert.match(body,/模型服务繁忙 private details/);
   },{upstreamRetries:2,timeout:5000});
   assert.equal(attempts,1);
 });
@@ -446,7 +440,7 @@ test('上游诊断默认关闭，显式开启时只记录脱敏错误字段和�
       lines.length=0;
       await withServer(async()=>new Response(sse([{success:false,code:500,message:`backend failure ${config.key} ${config.token}`}]),{headers:{'content-type':'text/event-stream'}}),async call=>{
         const response=await call({...request,messages:[{role:'user',content:'private prompt contents'}]});
-        assert.equal(response.status,502);await response.json();
+        assert.equal(response.status,500);await response.json();
         const diagnostic=lines.filter(line=>line.startsWith('[上游诊断]'));
         assert.equal(diagnostic.length,debugUpstream?1:0);
         if(debugUpstream){
@@ -491,7 +485,7 @@ test('历史兼容恢复失败不重复重放，显式会话 ID 保持不变',as
       bodies.push(JSON.parse(options.body));return new Response(sse([{success:false,code:500}]),{headers:{'content-type':'text/event-stream'}});
     },async call=>{
       const response=await call({...request,chat_group_id:'explicit-session',messages:[{role:'user',content:'旧问题'},{role:'assistant',content:'旧回答'},{role:'user',content:'继续'}]});
-      assert.equal(response.status,502);await response.json();
+      assert.equal(response.status,500);await response.json();
     },{historyFallback,upstreamRetries:1,timeout:5000});
     assert.equal(bodies.length,2);
     assert.equal(bodies[1].chatGroupId,'explicit-session');
@@ -514,7 +508,7 @@ test('完整文本历史恢复超过上下文窗口时不重发、不截断历�
   const context=Math.ceil(Buffer.byteLength(JSON.stringify({messages:body.messages,chatInfo:body.chatInfo}))/3)+35;
   let attempts=0;
   await withServer(async()=>{attempts++;return new Response(sse([{success:false,code:500}]),{headers:{'content-type':'text/event-stream'}});},async call=>{
-    const response=await call(input);assert.equal(response.status,502);await response.json();
+    const response=await call(input);assert.equal(response.status,500);await response.json();
   },{contextAuto:false,upstreamRetries:2,modelFetcher:async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:context}]}})});
   assert.equal(attempts,1);
 });
