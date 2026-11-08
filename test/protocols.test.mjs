@@ -229,17 +229,6 @@ test('Responses shell 命令流事件包含命令索引和完整内容',async()=
   assert.deepEqual(frames.filter(frame=>frame.type==='response.shell_call_command.done').map(frame=>[frame.command_index,frame.command]),[[0,'pwd'],[1,'git status']]);
   assert.equal(frames.filter(frame=>frame.type==='response.output_item.done').length,1);
 });
-test('Responses 本地文件检索输出完整流式状态事件',async()=>{
-  const frames=[],item={id:'fs_1',type:'file_search_call',status:'completed',queries:['retry limit'],results:[{file_id:'file_1',filename:'README.md'}]};
-  const output=new ProtocolOutput('/v1/responses',{model:'qwen-instruct'},frame=>{frames.push(JSON.parse(frame.split('data: ')[1]));},{},{fileSearchItem:item});
-  await output.start();
-  assert.deepEqual(frames.map(frame=>frame.type).slice(2),[
-    'response.output_item.added','response.file_search_call.in_progress','response.file_search_call.searching','response.file_search_call.completed','response.output_item.done'
-  ]);
-  assert.equal(frames[2].item.results,undefined);
-  assert.deepEqual(frames.at(-1).item.results,item.results);
-  assert.deepEqual(frames.map(frame=>frame.sequence_number),frames.map((_,index)=>index));
-});
 test('Responses Agent 结果保留失败状态与结构化 shell 输出',()=>{
   const input=[
     {type:'shell_call',call_id:'call_shell',action:{commands:['npm test']}},
@@ -281,12 +270,9 @@ test('Responses allowed_tools 只向上游暴露允许的工具',()=>{
   const normalized=normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'a',parameters:{}},{type:'custom',name:'patch'}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'custom',name:'patch'}]}});
   assert.equal(normalized.tool_choice,'required');assert.equal(normalized.tools.length,1);assert.equal(normalized.tools[0].function.name,'patch');assert.equal(normalized.tools[0].custom,true);
   assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'a'}],tool_choice:{type:'allowed_tools',mode:'auto',tools:[{type:'function',name:'missing'}]}}),/未知/);
-  const search=normalizeRequest('/v1/responses',{input:'查资料',tools:[{type:'web_search'},{type:'file_search',vector_store_ids:['vs_test']},{type:'function',name:'lookup',parameters:{type:'object'}}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'web_search'},{type:'function',name:'lookup'}]}});
+  const search=normalizeRequest('/v1/responses',{input:'查资料',tools:[{type:'web_search'},{type:'function',name:'lookup',parameters:{type:'object'}}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'web_search'},{type:'function',name:'lookup'}]}});
   assert.equal(search.net_go,true);assert.equal(search.tool_choice,'auto');assert.deepEqual(search.tools.map(tool=>tool.function.name),['lookup']);
-  const files=normalizeRequest('/v1/responses',{input:'查文档',tools:[{type:'web_search'},{type:'file_search',vector_store_ids:['vs_test']}],tool_choice:{type:'allowed_tools',mode:'required',tools:[{type:'file_search'}]}});
-  assert.equal(files.net_go,false);assert.equal(files.tool_choice,'auto');assert.deepEqual(files.tools,[]);
-  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',tools:[{type:'web_search'}],tool_choice:{type:'allowed_tools',mode:'auto',tools:[{type:'file_search'}]}}),/未知/);
-  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',tools:[{type:'web_search'}],tool_choice:{type:'file_search'}}),/未知/);
+
 });
 test('Responses function tool 保留 strict 参数校验语义',()=>{
   const value=normalizeRequest('/v1/responses',{input:'x',tools:[{type:'function',name:'lookup',strict:false,parameters:{type:'object',required:['query']}}]});
@@ -322,11 +308,11 @@ test('Responses background 参数接受流式和禁用存储',()=>{
   assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',background:'yes'}),/布尔值/);
 });
 
-test('Responses 接受上下文裁剪配置并拒绝无效阈值',()=>{
-  const value=normalizeRequest('/v1/responses',{input:'x',truncation:'auto',context_management:[{type:'compaction',compact_threshold:1000}]});
-  assert.equal(value.messages[0].content,'x');
-  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',truncation:'drop'}),/truncation/);
-  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',context_management:[{type:'compaction',compact_threshold:0}]}),/context_management/);
+test('Responses 拒绝自动裁剪和自动压缩配置，允许显式禁用裁剪',()=>{
+  assert.equal(normalizeRequest('/v1/responses',{input:'x',truncation:'disabled'}).messages[0].content,'x');
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',truncation:'auto'}),/自动裁剪/);
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',context_management:[{type:'compaction'}]}),/context_management/);
+  assert.throws(()=>normalizeRequest('/v1/responses',{input:'x',tools:[{type:'file_search',vector_store_ids:['vs_test']}]}),/工具类型/);
 });
 
 test('Chat 兼容旧版 functions/function_call，Responses 接受常用选项',()=>{
@@ -406,16 +392,8 @@ test('三种协议的服务端搜索映射到 netGo',()=>{
   assert.equal(normalizeRequest('/v1/responses',{input:'新闻',tools:[{type:'web_search'}],tool_choice:'none'}).net_go,false);
   assert.equal(normalizeRequest('/v1/responses',{input:'新闻',tools:[{type:'web_search'},{type:'function',name:'lookup',parameters:{type:'object'}}],tool_choice:{type:'function',name:'lookup'}}).net_go,false);
   assert.equal(normalizeRequest('/v1/responses',{input:'新闻',tools:[{type:'web_search'}],tool_choice:'required'}).tool_choice,'auto');
-  assert.equal(normalizeRequest('/v1/responses',{input:'文档',tools:[{type:'file_search',vector_store_ids:['vs_test']}],tool_choice:'required'}).tool_choice,'auto');
   assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'新闻'}],max_tokens:32,tools:[{type:'web_search_20250305',name:'web_search'}],tool_choice:{type:'none'}}).net_go,false);
   assert.equal(normalizeRequest('/v1/messages',{messages:[{role:'user',content:'新闻'}],max_tokens:32,tools:[{type:'web_search_20250305',name:'web_search'}],tool_choice:{type:'any'}}).tool_choice,'auto');
-});
-
-test('Legacy Completions 转成单轮续写并拒绝不可兑现选项',()=>{
-  const value=normalizeRequest('/v1/completions',{model:'qwen-code',prompt:'const x = ',suffix:';\n',max_tokens:32,n:1,echo:false});
-  assert.equal(value.messages.at(-1).role,'user');assert.match(value.messages.at(-1).content,/PREFIX/);assert.equal(value.max_tokens,32);
-  assert.throws(()=>normalizeRequest('/v1/completions',{prompt:['a','b']}),/单个字符串/);
-  assert.throws(()=>normalizeRequest('/v1/completions',{prompt:'a',n:2}),/n 仅支持 1/);
 });
 
 test('两个协议在上游结束前发送首个文本增量',async()=>{

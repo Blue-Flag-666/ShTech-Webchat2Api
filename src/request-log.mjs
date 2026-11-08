@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } f
 import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 
-const ROUTES=new Set(['/healthz','/health','/metrics','/v1/models','/v1/chat/completions','/v1/completions','/v1/responses','/v1/messages','/v1/files','/v1/uploads','/v1/vector_stores','/v1/batches','/v1/conversations','/v1/messages/count_tokens','/v1/responses/input_tokens','/v1/responses/compact','/v1/tokenizers/estimate-token-count']);
+const ROUTES=new Set(['/healthz','/health','/v1/models','/v1/chat/completions','/v1/responses','/v1/messages','/v1/files','/v1/conversations','/v1/messages/count_tokens','/v1/responses/input_tokens','/v1/responses/compact','/v1/tokenizers/estimate-token-count']);
 const MAX_BYTES=5*1024*1024,BACKUPS=3;
 
 export function routeLabel(path){
@@ -11,9 +11,6 @@ export function routeLabel(path){
     [/^\/v1\/models\/[^/]+$/,'/v1/models/:id'],
     [/^\/v1\/responses\/[^/]+(?:\/input_items|\/cancel)?$/,'/v1/responses/:id'],
     [/^\/v1\/files\/[^/]+(?:\/content)?$/,'/v1/files/:id'],
-    [/^\/v1\/uploads\/[^/]+\/(?:parts|complete|cancel)$/,'/v1/uploads/:id'],
-    [/^\/v1\/vector_stores\/[^/]+(?:\/.*)?$/,'/v1/vector_stores/:id'],
-    [/^\/v1\/batches\/[^/]+(?:\/cancel)?$/,'/v1/batches/:id'],
     [/^\/v1\/conversations\/[^/]+(?:\/.*)?$/,'/v1/conversations/:id']
   ])if(pattern.test(path))return label;
   return 'other';

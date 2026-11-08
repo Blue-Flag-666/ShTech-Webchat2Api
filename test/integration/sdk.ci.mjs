@@ -23,13 +23,12 @@ async function fixture(run) {
   finally { server.closeAllConnections();await new Promise(resolve=>server.close(resolve)); }
 }
 
-test('OpenAI SDK 自动分页完整读取文件、向量库和会话项',async()=>{
+test('OpenAI SDK 自动分页完整读取文件和会话项',async()=>{
   await fixture(async base=>{
     const client=new OpenAI({apiKey:'test',baseURL:`${base}/v1`,maxRetries:0});
-    const files=[],stores=[];
+    const files=[];
     for(let index=0;index<3;index++){
       files.push(await client.files.create({file:new File([`deployment guide ${index}`],`page-${index}.txt`,{type:'text/plain'}),purpose:'assistants'}));
-      stores.push(await client.vectorStores.create({name:`page-${index}`}));
     }
     const collect=async pages=>{const ids=[];for await(const value of pages){ids.push(value.id);assert.ok(ids.length<=10,'pagination must terminate');}return ids;};
     const expectedFiles=files.map(file=>file.id).sort();
@@ -37,12 +36,6 @@ test('OpenAI SDK 自动分页完整读取文件、向量库和会话项',async()
     assert.equal(first.data.length,1);assert.equal(first.hasNextPage(),true);
     const second=await first.getNextPage();assert.notEqual(second.data[0].id,first.data[0].id);
     assert.deepEqual((await collect(client.files.list({purpose:'assistants',limit:1}))).sort(),expectedFiles);
-    assert.deepEqual((await collect(client.vectorStores.list({limit:1}))).sort(),stores.map(store=>store.id).sort());
-    const batch=await client.vectorStores.fileBatches.create(stores[0].id,{file_ids:files.map(file=>file.id)});
-    assert.deepEqual((await collect(client.vectorStores.files.list(stores[0].id,{limit:1}))).sort(),expectedFiles);
-    assert.deepEqual((await collect(client.vectorStores.fileBatches.listFiles(batch.id,{vector_store_id:stores[0].id,limit:1}))).sort(),expectedFiles);
-    const search=await client.vectorStores.search(stores[0].id,{query:'deployment',max_num_results:1});
-    assert.equal(search.data.length,1);assert.equal(search.hasNextPage(),false);
     const conversation=await client.conversations.create({items:[{role:'user',content:'first'},{role:'assistant',content:'second'},{role:'user',content:'third'}]});
     const all=await client.conversations.items.list(conversation.id,{order:'asc'});
     assert.deepEqual(await collect(client.conversations.items.list(conversation.id,{limit:1,order:'asc'})),all.data.map(item=>item.id));
@@ -67,33 +60,12 @@ test('最新版 OpenAI SDK 调用 models、Chat 和 Responses 的 JSON/SSE',asyn
     assert.equal((await client.files.list({purpose:'user_data'})).data[0].id,uploaded.id);
     const fileResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_text',text:'阅读文件'},{type:'input_file',file_id:uploaded.id}]}],store:false});
     assert.equal(fileResponse.output_text,'你好');assert.equal((await client.files.delete(uploaded.id)).deleted,true);
-    const bytes=Buffer.from('chunked upload'),upload=await client.uploads.create({bytes:bytes.length,filename:'chunked.txt',mime_type:'text/plain',purpose:'user_data'});
-    const first=await client.uploads.parts.create(upload.id,{data:new File([bytes.subarray(0,8)],'first.bin')});
-    const second=await client.uploads.parts.create(upload.id,{data:new File([bytes.subarray(8)],'second.bin')});
-    const completed=await client.uploads.complete(upload.id,{part_ids:[first.id,second.id]});assert.equal(completed.status,'completed');assert.equal(await (await client.files.content(completed.file.id)).text(),'chunked upload');
     const pdf=await client.files.create({file:new File([simplePdf('PDF attachment works')],'document.pdf',{type:'application/pdf'}),purpose:'user_data'});
     const pdfResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_file',file_id:pdf.id}]}],store:false});assert.equal(pdfResponse.output_text,'你好');
     const office=await client.files.create({file:new File([simpleDocx()],'report.docx',{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}),purpose:'user_data'});
     const officeResponse=await client.responses.create({model:'qwen-instruct',input:[{role:'user',content:[{type:'input_file',file_id:office.id}]}],store:false});assert.equal(officeResponse.output_text,'你好');
-    const knowledge=await client.files.create({file:new File(['Production deployment uses blue-green releases.'],'runbook.md',{type:'text/markdown'}),purpose:'assistants'});
-    const vectorStore=await client.vectorStores.create({name:'SDK knowledge',file_ids:[knowledge.id]});assert.equal(vectorStore.file_counts.completed,1);
-    assert.equal((await client.vectorStores.retrieve(vectorStore.id)).id,vectorStore.id);assert.equal((await client.vectorStores.list({limit:1})).data[0].id,vectorStore.id);
-    assert.equal((await client.vectorStores.files.list(vectorStore.id)).data[0].id,knowledge.id);
-    const search=await client.vectorStores.search(vectorStore.id,{query:'production deployment'});assert.equal(search.data[0].file_id,knowledge.id);
-    const searchedResponse=await client.responses.create({model:'qwen-instruct',input:'How is production deployed?',tools:[{type:'file_search',vector_store_ids:[vectorStore.id]}],include:['file_search_call.results'],store:false});
-    assert.equal(searchedResponse.output_text,'你好');assert.equal(searchedResponse.output[0].type,'file_search_call');assert.equal(searchedResponse.output[0].results[0].file_id,knowledge.id);
-    assert.equal((await client.vectorStores.delete(vectorStore.id)).deleted,true);
-    const batchLine={custom_id:'sdk-batch-1',method:'POST',url:'/v1/responses',body:{model:'qwen-instruct',input:'批处理',store:false}};
-    const batchInput=await client.files.create({file:new File([JSON.stringify(batchLine)],'requests.jsonl',{type:'application/jsonl'}),purpose:'batch'});
-    let batch=await client.batches.create({input_file_id:batchInput.id,endpoint:'/v1/responses',completion_window:'24h'});
-    for(let attempt=0;attempt<100&&!['completed','failed','cancelled'].includes(batch.status);attempt++){await new Promise(resolve=>setTimeout(resolve,10));batch=await client.batches.retrieve(batch.id);}
-    assert.equal(batch.status,'completed');assert.equal(batch.request_counts.completed,1);
-    const batchOutput=JSON.parse((await (await client.files.content(batch.output_file_id)).text()).trim());assert.equal(batchOutput.custom_id,'sdk-batch-1');assert.equal(batchOutput.response.body.output_text,'你好');
-    assert.equal((await client.batches.list({limit:1})).data[0].id,batch.id);
     const chat=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}]});
     assert.equal(chat.choices[0].message.content,'你好');
-    const completion=await client.completions.create({model:'qwen-instruct',prompt:'你'});
-    assert.equal(completion.choices[0].text,'你好');
     const chatStream=await client.chat.completions.create({model:'qwen-instruct',messages:[{role:'user',content:'你好'}],stream:true,stream_options:{include_usage:true}});
     let chatText='',usage;for await(const chunk of chatStream){chatText+=chunk.choices[0]?.delta?.content || '';usage=chunk.usage || usage;}
     assert.equal(chatText,'你好');assert.equal(usage.total_tokens,3);

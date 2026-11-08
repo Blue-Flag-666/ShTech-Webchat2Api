@@ -76,7 +76,7 @@ docker run -d --name shtech-webchat-api --restart unless-stopped --env-file .env
 
 上游错误保留实际 HTTP 状态码、业务错误码和脱敏错误信息，不会因之前的失败熔断模型。需要进一步诊断时，可临时设置 `GENAI_DEBUG_UPSTREAM=true`，查看 `[上游诊断]` 中的脱敏错误字段；排查后关闭。
 
-旧会话遇到无说明的上游 500 时，服务会在输出前尝试一次文本历史兼容恢复，保留完整历史。可用 `GENAI_HISTORY_FALLBACK=false` 关闭；恢复仍受上下文和重试额度限制。
+不自动裁剪历史、转换历史格式、修复输出或重试生成。上游失败直接返回；仅在认证失效且尚未输出时允许刷新一次登录凭据。上下文超限请由客户端处理。
 
 `GENAI_TIMEOUT_MS` 默认 `120000`：生成阶段按连续无有效响应数据的时间计时，持续输出的长回答不会在两分钟后中断。
 
@@ -89,10 +89,12 @@ npm start
 
 ## 支持与限制
 
-- 支持流式回答、工具调用、思考内容、图片、JSON Schema，以及文件、对话、批处理和本地文本检索接口。
+- 支持流式回答、工具调用、思考内容、图片、JSON Schema，以及文件、对话、Responses 后台任务和事件续读接口。
 - 工具通过提示词生成并由客户端执行；usage 和 token 数为兼容估算，不能完全替代原生 Kimi 或商业 API。
 - 文件和图片须小于 10 MiB。扫描文档 OCR、音视频、Realtime、embeddings、reranker、微调和原生缓存不支持。
 
-可在 `.env` 设置 `GENAI_OUTPUT_REPAIR=true`，允许工具参数和结构化输出失败后定向修复一次。更多可选配置见 [.env.example](.env.example)。
+更多可选配置见 [.env.example](.env.example)。
+
+v0.17 起移除旧版 Completions、分片上传、批处理、本地检索、幂等重放和 metrics 接口；旧配置中的相关开关不再生效。已有数据目录中的旧资源文件会保留。
 
 CI 覆盖四个客户端及四个自部署模型路由，使用模拟上游，不访问学校接口。

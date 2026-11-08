@@ -13,16 +13,10 @@ import { openReasoning } from './reasoning-state.mjs';
 import { uploadNativeFiles } from './native-files.mjs';
 import { ResponseStore } from './response-store.mjs';
 import { FileStore, expandInputFiles, prepareInputFiles, parseMultipart, readRawBody, uploadedFile } from './files.mjs';
-import { UploadStore, uploadPart } from './uploads.mjs';
-import { BatchStore } from './batches.mjs';
-import { VectorStore } from './vector-stores.mjs';
 import { DiskState } from './persistence.mjs';
-import { Metrics } from './metrics.mjs';
-import { IdempotencyStore } from './idempotency.mjs';
 import { RequestLogger } from './request-log.mjs';
 import { normalizeUpstreamEvent, protocolFailure } from './upstream-sse.mjs';
 import { upstreamBusinessFailure, upstreamHttpFailure, upstreamDiagnostic } from './upstream-errors.mjs';
-import { textHistoryRequest } from './upstream-history.mjs';
 import { withStreamTimeout } from './stream-timeout.mjs';
 
 const UPSTREAM = 'https://genai.shanghaitech.edu.cn/htk/chat/start/chat';
@@ -38,15 +32,12 @@ export function configuration(env = process.env) {
     group: env.GENAI_CHAT_GROUP_ID || '', key: secret(env,'API_KEY'), uploadToken:secret(env,'GENAI_UPLOAD_TOKEN'),
     startupCheck: env.GENAI_STARTUP_CHECK !== 'false',
     debugUpstream: env.GENAI_DEBUG_UPSTREAM === 'true',
-    historyFallback: env.GENAI_HISTORY_FALLBACK !== 'false',
     netGo: bool(env.GENAI_NET_GO), timeout: Number(env.GENAI_TIMEOUT_MS || 120000), modelTtl: Number(env.GENAI_MODEL_TTL_MS || 300000),logFile:env.GENAI_LOG_FILE || '',
     concurrency:Number(env.GENAI_CONCURRENCY || 1),queueSize:Number(env.GENAI_QUEUE_SIZE || 32),queueTimeout:Number(env.GENAI_QUEUE_TIMEOUT_MS || 120000),modelLimits:modelLimitsConfig(env.GENAI_MODEL_LIMITS),
     requestLimit:Number(env.GENAI_REQUEST_LIMIT_MB || 144)*1024*1024,
     responseStoreSize:Number(env.GENAI_RESPONSE_STORE_SIZE || 128),responseStoreTtl:Number(env.GENAI_RESPONSE_STORE_TTL_MS || 3600000),
     fileStoreSize:Number(env.GENAI_FILE_STORE_SIZE || 32),fileStoreTtl:Number(env.GENAI_FILE_STORE_TTL_MS || 3600000),fileMaxBytes:Number(env.GENAI_FILE_MAX_MB || 10)*1024*1024,pdfMaxPages:Number(env.GENAI_PDF_MAX_PAGES || 200),nativeFileUpload:bool(env.GENAI_NATIVE_FILE_UPLOAD),
-    batchStoreSize:Number(env.GENAI_BATCH_STORE_SIZE || 32),batchStoreTtl:Number(env.GENAI_BATCH_STORE_TTL_MS || 3600000),
-    vectorStoreSize:Number(env.GENAI_VECTOR_STORE_SIZE || 32),vectorStoreTtl:Number(env.GENAI_VECTOR_STORE_TTL_MS || 3600000),vectorStoreMaxFiles:Number(env.GENAI_VECTOR_STORE_MAX_FILES || 100),
-    upstreamRetries:Number(env.GENAI_UPSTREAM_RETRIES ?? 2),outputRepair:bool(env.GENAI_OUTPUT_REPAIR),contextAuto:env.GENAI_CONTEXT_AUTO!=='false',contextStrategy:env.GENAI_CONTEXT_STRATEGY || 'agent',corsOrigin:env.CORS_ORIGIN || '',dataDir:env.GENAI_DATA_DIR || '',dataQuotaBytes:Number(env.GENAI_DATA_QUOTA_MB||0)*1024*1024 };
+    corsOrigin:env.CORS_ORIGIN || '',dataDir:env.GENAI_DATA_DIR || '',dataQuotaBytes:Number(env.GENAI_DATA_QUOTA_MB||0)*1024*1024 };
 }
 
 export function upstreamBody(input, config, supportedModels, formatPolicy=null,media={}) {
@@ -190,53 +181,6 @@ function estimateTokens(value) {
   });
   return Math.ceil(Buffer.byteLength(serialized||'')/3)+images*1024;
 }
-function compactToolText(content,limit) {
-  if(content.length<=limit)return content;
-  const diagnostic=/\b(?:error|failed|failure|exception|traceback|assertion|diff --git|updated file|begin patch)\b|错误|失败|异常|补丁|已修改/i;
-  const found=content.split(/\r?\n/).filter(line=>diagnostic.test(line)).slice(-12).join('\n');
-  const head=content.slice(0,Math.floor(limit*.2));
-  const details=found.slice(-Math.floor(limit*.35));
-  const tail=content.slice(-Math.floor(limit*.3));
-  return `${head}\n[${content.length} characters; middle omitted]\n${details}\n${tail}`;
-}
-export function manageContextMessages(messages,threshold,strategy='agent') {
-  if(!Number.isInteger(threshold)||threshold<1||!['agent','recent'].includes(strategy)||estimateTokens(messages)<=threshold)return messages;
-  const protectedRoles=new Set(['system','developer']);
-  const system=messages.filter(message=>protectedRoles.has(message.role)),turns=[];
-  let current=[];
-  for(const message of messages) {
-    if(protectedRoles.has(message.role))continue;
-    if(message.role==='user'&&current.some(item=>item.role==='assistant'||item.role==='tool')){turns.push(current);current=[];}
-    current.push(message);
-  }
-  if(current.length)turns.push(current);
-  if(!turns.length)return system;
-  const limit=Math.max(1024,Math.min(8192,Math.floor(threshold*1.5)));
-  const latestOriginal=[...turns.at(-1)];
-  if(strategy==='agent')turns.forEach(turn=>turn.forEach((message,index)=>{
-    if(message.role==='tool'&&typeof message.content==='string'&&message.content.length>limit)turn[index]={...message,content:compactToolText(message.content,limit)};
-  }));
-  if(strategy==='agent'&&latestOriginal.some(message=>message.role==='tool')&&estimateTokens([...system,...turns.at(-1)])>threshold){
-    let cap=Math.min(limit,4096);
-    while(cap>=128){
-      const compacted=latestOriginal.map(message=>message.role==='tool'&&typeof message.content==='string'&&message.content.length>cap
-        ? {...message,content:compactToolText(message.content,cap)}:message);
-      turns[turns.length-1]=compacted;
-      if(estimateTokens([...system,...compacted])<=threshold)break;
-      cap=Math.floor(cap/2);
-    }
-  }
-  const selected=new Set([turns.length-1]);
-  const important=/\b(?:error|failed|failure|exception|traceback|assertion|diff --git|updated file|begin patch|git status|apply_patch)\b|错误|失败|异常|补丁|已修改/i;
-  const candidates=Array.from({length:turns.length-1},(_,index)=>index).reverse();
-  if(strategy==='agent')candidates.sort((a,b)=>Number(turns[b].some(message=>important.test(message.content||'')))-Number(turns[a].some(message=>important.test(message.content||'')))||b-a);
-  for(const index of candidates){
-    const trial=[...system,...[...selected,index].sort((a,b)=>a-b).flatMap(value=>turns[value])];
-    if(estimateTokens(trial)<=threshold)selected.add(index);
-    else if(strategy==='recent')break;
-  }
-  return [...system,...[...selected].sort((a,b)=>a-b).flatMap(index=>turns[index])];
-}
 async function readBody(req,limit=144*1024*1024) {
   const body=await readRawBody(req,limit);
   try { return JSON.parse(body.toString('utf8')); } catch { throw error(400, '无效 JSON','body'); }
@@ -270,7 +214,6 @@ async function* withHeartbeats(iterable,interval=15000) {
   }
 }
 
-function delay(ms,signal){return new Promise((resolve,reject)=>{if(signal?.aborted)return reject(error(499,'客户端已断开'));const timer=setTimeout(done,ms);function done(){signal?.removeEventListener('abort',abort);resolve();}function abort(){clearTimeout(timer);reject(error(499,'客户端已断开'));}signal?.addEventListener('abort',abort,{once:true});});}
 export function parseRetryAfter(value,now=Date.now()) {
   if(typeof value!=='string'||!value.trim())return null;
   const text=value.trim();
@@ -281,45 +224,31 @@ export function parseRetryAfter(value,now=Date.now()) {
   const date=Date.parse(text);
   return Number.isFinite(date)?Math.max(0,date-now):null;
 }
-function upstreamBackoff(status,attempt) {
-  const base={429:1000,502:500,503:1000,504:1250}[status]??1000;
-  return Math.min(base*2**attempt,8000);
-}
-const retryableNetworkCodes=new Set(['ECONNRESET','ECONNREFUSED','ECONNABORTED','EPIPE','ETIMEDOUT','EAI_AGAIN','EHOSTUNREACH','ENETUNREACH','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_CONNECT_TIMEOUT','UND_ERR_SOCKET']);
-const retryableNetworkError=cause=>retryableNetworkCodes.has(cause?.code??cause?.cause?.code);
-async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, onDispatch, diagnostics, recovery) {
-  let renewed=false,attempt=0;
+async function* authenticatedEvents(fetcher, options, tokenManager, diagnostics) {
+  let renewed=false,dispatches=0;
   const request=JSON.parse(options.body),model=request.aiType,trace=randomUUID().slice(0,8);
   const secrets=()=>[diagnostics?.key,diagnostics?.cookie,diagnostics?.uploadToken,diagnostics?.token,tokenManager.username,tokenManager.password,tokenManager.token,options.headers['x-access-token'],options.headers.Cookie];
-  let dispatches=0,historyRecovered=false;
   while(true) {
-    let response;
-    try{dispatches++;onDispatch?.();response=await fetcher(UPSTREAM,options);}catch(cause){
-      if(options.signal?.aborted||!retryableNetworkError(cause)||attempt>=retries)throw cause;
-      await delay(upstreamBackoff(502,attempt++),options.signal);
-      continue;
-    }
-    if(response.status===401 && !renewed && tokenManager.renewable) {
+    dispatches++;
+    const response=await fetcher(UPSTREAM,options);
+    // Authentication renewal is separate from generation retries. Only an
+    // explicit rejection before output may refresh credentials once.
+    if(response.status===401&&!renewed&&tokenManager.renewable){
       await response.body?.cancel();
       options.headers['x-access-token']=await refreshRejectedToken(tokenManager,options.headers['x-access-token'],options.signal);renewed=true;continue;
     }
-    const serverDelay=parseRetryAfter(response.headers.get('retry-after'));
-    if([429,500,502,503,504].includes(response.status)&&attempt<retries){
-      const pause=serverDelay??upstreamBackoff(response.status,attempt);
-      if(pause<=30000){attempt++;await response.body?.cancel();await delay(pause,options.signal);continue;}
-    }
-    if(!response.ok) {
-      const status=response.status;
+    if(!response.ok){
       const failure=await upstreamHttpFailure(response,model,secrets());
-      if(serverDelay!==null&&[429,502,503,504].includes(status))failure.retryAfter=Math.max(1,Math.ceil(serverDelay/1000));
+      const wait=parseRetryAfter(response.headers.get('retry-after'));
+      if(wait!==null)failure.retryAfter=Math.max(1,Math.ceil(wait/1000));
       throw failure;
     }
-    if(!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+    if(!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')){
       await response.body?.cancel();throw error(502,'上游没有返回 SSE，可能登录已失效');
     }
-    let emitted=false,retry=false,retryFailure,seenChoice=false,finished=false,pending=[],pendingBytes=0,ignored=0;
+    let emitted=false,refresh=false,seenChoice=false,finished=false,pending=[],pendingBytes=0,ignored=0;
     try{
-      for await(const rawItem of events(response.body)) {
+      for await(const rawItem of events(response.body)){
         let item;
         if(rawItem.event==='error'){
           let failure;try{failure=JSON.parse(rawItem.data);}catch{failure={message:rawItem.data};}
@@ -330,108 +259,37 @@ async function* authenticatedEvents(fetcher, options, tokenManager, retries=2, o
           if(!seenChoice)throw error(502,'上游 SSE 缺少响应选择项');
           finished=true;emitted=true;yield item;continue;
         }
-        if(item.event==='error')throw error(502,'上游返回错误事件');
         let value;try{value=JSON.parse(item.data);}catch{throw error(502,'上游 SSE 包含无效 JSON');}
         if(value?.error||value?.success===false||Number(value?.code)>=400){
           const failure=upstreamBusinessFailure(value,model,secrets());
           console.warn(`[上游业务] ${failure.message}`);
           if(diagnostics?.debugUpstream)console.warn(`[上游诊断] ${JSON.stringify({trace,attempt:dispatches,model,category:failure.category,
-            max_output_tokens:request.maxToken,history_messages:request.messages?.length??0,
-            history_mode:historyRecovered?'text':'structured',
+            max_output_tokens:request.maxToken,history_messages:request.messages.length,history_mode:'structured',
             estimated_input_tokens:estimateTokens({messages:request.messages,chatInfo:request.chatInfo}),
             history_roles:request.messages.map(message=>['system','user','assistant'].includes(message.role)?message.role:'other'),
-            thinking:request.thinking??null,session:diagnostics.group?'configured':'per-request',
-            ...upstreamDiagnostic(value,[diagnostics.key,diagnostics.cookie,tokenManager.username,tokenManager.password,tokenManager.token,options.headers['x-access-token']])})}`);
-          if(failure.category==='authentication'&&!emitted&&!renewed&&tokenManager.renewable){retry=true;break;}
-          if(!emitted&&failure.category==='unknown'&&Number(value.code??value.error?.code)===500&&recovery&&request.messages.length){
-            const group=recovery.resetSession&&!request.fileIds?.length?newChatGroupId():request.chatGroupId;
-            const fallback=textHistoryRequest(request,group);
-            const estimate=estimateTokens({messages:fallback.messages,chatInfo:fallback.chatInfo})+fallback.maxToken;
-            if(!historyRecovered&&attempt<retries&&estimate<=recovery.contextWindow){
-              console.warn(`[上游恢复] 模型 ${model} 将 ${request.messages.length} 条历史保留为文本，重试一次`);
-              Object.assign(request,fallback);options.body=JSON.stringify(request);historyRecovered=true;
-              retryFailure=failure;break;
-            }
-            throw failure;
-          }
-          if(historyRecovered&&failure.category==='unknown')throw failure;
-          if(!emitted&&['unknown','busy','timeout'].includes(failure.category)&&[500,502,503,504].includes(failure.status)&&attempt<retries){retryFailure=failure;break;}
+            thinking:request.thinking??null,session:diagnostics.group?'configured':'per-request',...upstreamDiagnostic(value,secrets())})}`);
+          if(failure.category==='authentication'&&!emitted&&!renewed&&tokenManager.renewable){refresh=true;break;}
           throw failure;
         }
         if(!Array.isArray(value?.choices)&&value?.other===undefined&&value?.usage===undefined)throw protocolFailure('未知上游 SSE 格式');
-        if(Array.isArray(value?.choices)&&value.choices.length){
-          seenChoice=true;
-          if(value.choices[0]?.finish_reason!=null)finished=true;
-        }
+        if(value.choices?.length){seenChoice=true;if(value.choices[0]?.finish_reason!=null)finished=true;}
         if(!seenChoice){
           pendingBytes+=Buffer.byteLength(item.data);
           if(pending.length>=64||pendingBytes>65536)throw error(502,'上游在正文前发送过多元数据');
           pending.push(item);continue;
         }
         for(const held of pending){emitted=true;yield held;}
-        pending=[];
-        emitted=true;yield item;
+        pending=[];emitted=true;yield item;
       }
-    }catch(cause){
-      if(cause.upstreamProtocol)console.warn(`[上游协议] ${cause.message}`);
-      if(!emitted&&!options.signal?.aborted&&cause.upstreamProtocol&&attempt<Math.min(retries,1)){
-        await delay(upstreamBackoff(502,attempt++),options.signal);continue;
-      }
-      if(emitted||options.signal?.aborted||!retryableNetworkError(cause)||attempt>=retries)throw cause;
-      await delay(upstreamBackoff(502,attempt++),options.signal);
-      continue;
+    }catch(cause){if(cause.upstreamProtocol)console.warn(`[上游协议] ${cause.message}`);throw cause;}
+    if(!refresh){
+      if(!emitted)throw error(502,'上游返回空 SSE');
+      if(!seenChoice)throw error(502,'上游 SSE 缺少响应选择项');
+      if(!finished)throw error(502,'上游流意外结束，未收到完成标记');
+      return;
     }
-    if(retryFailure){await delay(upstreamBackoff(retryFailure.status,attempt++),options.signal);continue;}
-    if(!retry&&!emitted&&attempt<retries){
-      await delay(upstreamBackoff(502,attempt++),options.signal);
-      continue;
-    }
-    if(!retry&&!emitted)throw error(502,'上游返回空 SSE');
-    if(!retry&&!seenChoice)throw error(502,'上游 SSE 缺少响应选择项');
-    if(!retry&&!finished)throw error(502,'上游流意外结束，未收到完成标记');
-    if(!retry)return;
-    // No output was exposed; the rejected stream has been closed before retry.
     options.headers['x-access-token']=await refreshRejectedToken(tokenManager,options.headers['x-access-token'],options.signal);renewed=true;
   }
-}
-async function repairGeneratedOutput(fetcher,tokenManager,config,model,headers,body,invalidText,reason,policy,formatPolicy,signal,contextWindow,recovery) {
-  const prompt=[`The previous answer failed validation: ${String(reason).slice(0,500)}. Correct it and return the complete answer again.`,
-    policy?toolPrompt(policy):outputPrompt(formatPolicy)].filter(Boolean).join('\n\n');
-  const correction={...body,chatInfo:prompt};
-  const promptSize=()=>estimateTokens({messages:correction.messages,chatInfo:correction.chatInfo});
-  let excerptLimit=32768;
-  while(true){
-    const excerpt=invalidText.length<=excerptLimit?invalidText
-      :`${invalidText.slice(0,Math.floor(excerptLimit/2))}\n[invalid answer excerpt; middle omitted]\n${invalidText.slice(-Math.floor(excerptLimit/2))}`;
-    correction.messages=[...body.messages,{role:'user',content:body.chatInfo},{role:'assistant',content:excerpt}];
-    if(config.contextAuto!==false)correction.messages=manageContextMessages(correction.messages,
-      Math.max(1,contextWindow-body.maxToken-estimateTokens(prompt)-32),config.contextStrategy??'agent');
-    if(promptSize()+body.maxToken<=contextWindow)break;
-    if(excerptLimit<=512)throw error(502,'无效答案的修复请求超过模型上下文窗口；请缩短输入或降低输出 token 上限');
-    excerptLimit=Math.max(512,Math.floor(excerptLimit/2));
-  }
-  let text='',reasoning='',last,seen=false,finished=false;
-  const source=withStreamTimeout(authenticatedEvents(fetcher,{method:'POST',headers:{...headers},body:JSON.stringify(correction),signal,redirect:'error'},tokenManager,config.upstreamRetries??2,undefined,config,recovery),config.timeout??120000);
-  for await(const item of source) {
-    if(item.data==='[DONE]')break;
-    if(item.event==='error')throw error(502,'修复请求收到上游错误事件');
-    let chunk;try{chunk=JSON.parse(item.data);}catch{throw error(502,'修复请求返回无效 SSE JSON');}
-    if(chunk.error)throw error(502,'修复请求被上游拒绝');
-    if(!Array.isArray(chunk.choices)){
-      if(chunk.other!==undefined||chunk.usage!==undefined){last={...last,...chunk,choices:last?.choices};continue;}
-      throw error(502,'修复请求返回未知 SSE 格式');
-    }
-    if(!chunk.choices.length){last={...last,...chunk,choices:last?.choices};continue;}
-    if(chunk.choices.length!==1||chunk.choices[0].index!==0)throw error(502,'修复请求返回多个候选');
-    const choice=chunk.choices[0],part=choice.delta?.content??'',thought=choice.delta?.reasoning_content??choice.delta?.reasoning??choice.delta?.thinking??'';
-    if(typeof part!=='string'||typeof thought!=='string')throw error(502,'修复请求返回非文本内容');
-    text+=part;reasoning+=thought;seen=true;
-    if(Buffer.byteLength(text)+Buffer.byteLength(reasoning)>8*1024*1024)throw error(502,'修复请求响应超过 8 MiB');
-    if(choice.finish_reason!=null)finished=true;
-    last={...last,...chunk};
-  }
-  if(!seen||!finished)throw error(502,'修复请求意外结束');
-  return{text,reasoning,last,promptBytes:Buffer.byteLength(JSON.stringify(correction.messages))+Buffer.byteLength(prompt)};
 }
 export function createServer(config = configuration(), fetcher = upstreamFetch, modelFetcher = fetchModelList, tokenManager = new TokenManager(config), imageFetcher=fetch, frontendFetcher) {
   const disk=config.dataDir?new DiskState(config.dataDir,config.dataQuotaBytes??0):null;
@@ -439,29 +297,14 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
   try{
   const persisted=(name,options)=>disk?.map(name,options)??new Map();
   const queue=new RequestQueue(config.concurrency??1,config.queueSize??32,config.queueTimeout??120000,config.modelLimits??{});
-  const metrics=new Metrics();
-  const idempotency=new IdempotencyStore();
   const requestLogger=new RequestLogger(config.logFile||'');
   const responseStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000);
   const conversationStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'对话',persisted('conversations'));
   const compactionStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'压缩状态');
   const itemReferenceStore=new ResponseStore(config.responseStoreSize??128,config.responseStoreTtl??3600000,'响应项');
   const fileStore=new FileStore(config.fileStoreSize??32,config.fileStoreTtl??3600000,config.fileMaxBytes??10*1024*1024,persisted('files'));
-  const uploadStore=new UploadStore(fileStore,config.fileStoreSize??32,3600000,persisted('uploads'));
   let server;
-  async function dispatchBatch(url,body,signal,requestId){
-    const address=server?.address();if(!address||typeof address!=='object')throw new Error('本地服务尚未监听');
-    const host=address.family==='IPv6'?'[::1]':'127.0.0.1';
-    const payload={...body,stream:false,...(url==='/v1/responses'?{background:false}:{})};
-    const response=await fetch(`http://${host}:${address.port}${url}`,{method:'POST',headers:{Authorization:`Bearer ${config.key}`,'Content-Type':'application/json','X-Shtech-Batch-Request-Id':requestId},body:JSON.stringify(payload),signal});
-    const text=await response.text();let value;try{value=JSON.parse(text);}catch{value={error:{message:text||`HTTP ${response.status}`}};}
-    return{status:response.status,requestId:response.headers.get('x-request-id')||requestId,body:value};
-  }
-  const batchEntries=persisted('batches',{encode:entry=>{const {controller,...saved}=entry;return saved;},decode:entry=>({...entry,controller:new AbortController()})});
-  const batchStore=new BatchStore(fileStore,dispatchBatch,{maximum:config.batchStoreSize??32,ttl:config.batchStoreTtl??3600000,entries:batchEntries});
-  const vectorStore=new VectorStore(fileStore,{maximum:config.vectorStoreSize??32,ttl:config.vectorStoreTtl??3600000,maxFiles:config.vectorStoreMaxFiles??100,pdfMaxPages:config.pdfMaxPages??200,entries:persisted('vector-stores')});
-  const backgroundJobs=new Map();
-  const backgroundStreams=new Map();
+  const backgroundJobs=new Map(),backgroundStreams=new Map();
   function notifyBackground(log){log.version++;for(const notify of log.waiters)notify();log.waiters.clear();}
   function closeBackground(log){if(!log.done){log.done=true;notifyBackground(log);}}
   function pruneBackground(){
@@ -621,7 +464,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
   server=http.createServer(async (req, res) => {
     let controller, timer, release, path=req.url,requestUrl,timedOut=false,requestId='';
     const started=process.hrtime.bigint();let measured=false;
-    const measure=status=>{if(measured)return;measured=true;const seconds=Number(process.hrtime.bigint()-started)/1e9;metrics.observe(req.method,status,seconds);requestLogger.observe({requestId,method:req.method,path,status,durationMs:seconds*1000});};
+    const measure=status=>{if(measured)return;measured=true;const seconds=Number(process.hrtime.bigint()-started)/1e9;requestLogger.observe({requestId,method:req.method,path,status,durationMs:seconds*1000});};
     res.once('finish',()=>measure(res.statusCode));
     res.once('close',()=>measure(499));
     try {
@@ -642,27 +485,11 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok' });
       if (!config.key || !authorized(req, config.key, path)) throw error(401, '需要有效的本地 API Bearer 密钥');
-      if(req.method==='GET'&&path==='/metrics'){
-        const body=metrics.render({queueActive:queue.active,queueDepth:queue.depth,backgroundRequests:backgroundJobs.size,storedFiles:fileStore.size,vectorStores:vectorStore.size,dataUsedBytes:disk?.usageBytes()??0});
-        res.writeHead(200,{'Content-Type':'text/plain; version=0.0.4; charset=utf-8','Cache-Control':'no-store'});return res.end(body);
-      }
       if (req.method === 'GET' && path === '/health') {
         const probe=requestUrl.searchParams.get('upstream');
         if(probe!==null&&!['0','1','false','true'].includes(probe))throw error(400,'upstream 仅支持 0 或 1');
         const live=probe==='1'||probe==='true'?await probeUpstream():null;
-        return json(res,live&&live.upstream_status!=='ok'?503:200,{status:live&&live.upstream_status!=='ok'?'degraded':'ok',upstream_configured:tokenManager.configured,...(live||{}),persistence_enabled:Boolean(disk),persistence_corrupt_resources:disk?.corruptResources.length??0,persistence_recovered_resources:disk?.recoveredResources.length??0,data_used_bytes:disk?.usageBytes()??0,data_quota_bytes:disk?.quotaBytes??0,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,active_batches:batchStore.active,stored_batches:batchStore.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size,stored_items:itemReferenceStore.size,stored_files:fileStore.size,pending_uploads:uploadStore.size,stored_vector_stores:vectorStore.size,indexed_vector_files:vectorStore.fileCount});
-      }
-      if(req.method==='POST'&&path==='/v1/uploads')return json(res,200,uploadStore.create(await readBody(req,config.requestLimit)));
-      const uploadMatch=/^\/v1\/uploads\/([^/]+)\/(parts|complete|cancel)$/.exec(path);
-      if(uploadMatch){
-        let uploadId;try{uploadId=decodeURIComponent(uploadMatch[1]);}catch{throw error(400,'Upload ID 编码无效');}
-        if(req.method!=='POST')throw error(405,'Upload 资源只支持 POST');
-        if(uploadMatch[2]==='parts'){
-          const parts=parseMultipart(await readRawBody(req,config.requestLimit),req.headers['content-type']);
-          return json(res,200,uploadStore.addPart(uploadId,uploadPart(parts)));
-        }
-        if(uploadMatch[2]==='complete')return json(res,200,uploadStore.complete(uploadId,await readBody(req,config.requestLimit)));
-        return json(res,200,uploadStore.cancel(uploadId));
+        return json(res,live&&live.upstream_status!=='ok'?503:200,{status:live&&live.upstream_status!=='ok'?'degraded':'ok',upstream_configured:tokenManager.configured,...(live||{}),persistence_enabled:Boolean(disk),persistence_corrupt_resources:disk?.corruptResources.length??0,persistence_recovered_resources:disk?.recoveredResources.length??0,data_used_bytes:disk?.usageBytes()??0,data_quota_bytes:disk?.quotaBytes??0,active_requests:queue.active,queued_requests:queue.depth,background_requests:backgroundJobs.size,stored_responses:responseStore.size,stored_conversations:conversationStore.size,stored_compactions:compactionStore.size,stored_items:itemReferenceStore.size,stored_files:fileStore.size});
       }
       if(path==='/v1/files'){
         if(req.method==='POST'){
@@ -683,72 +510,6 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         if(req.method==='GET')return json(res,200,fileStore.get(fileId));
         if(req.method==='DELETE'&&!fileMatch[2]){fileStore.delete(fileId);return json(res,200,{id:fileId,object:'file',deleted:true});}
         throw error(405,'文件资源不支持此方法');
-      }
-      if(path==='/v1/vector_stores'){
-        if(req.method==='POST')return json(res,200,await vectorStore.create(await readBody(req,config.requestLimit)));
-        if(req.method==='GET'){
-          const options={limit:Number(requestUrl.searchParams.get('limit')||20),order:requestUrl.searchParams.get('order')||'desc',after:requestUrl.searchParams.get('after')||undefined,before:requestUrl.searchParams.get('before')||undefined};
-          if([...requestUrl.searchParams.keys()].some(key=>!['limit','order','after','before'].includes(key)))throw error(400,'向量库分页参数无效');return json(res,200,vectorStore.list(options));
-        }
-        throw error(405,'向量库集合不支持此方法');
-      }
-      const vectorFileMatch=/^\/v1\/vector_stores\/([^/]+)\/files\/([^/]+)(\/content)?$/.exec(path);
-      if(vectorFileMatch){
-        let storeId,fileId;try{storeId=decodeURIComponent(vectorFileMatch[1]);fileId=decodeURIComponent(vectorFileMatch[2]);}catch{throw error(400,'向量库文件 ID 编码无效');}
-        if(req.method==='GET'&&vectorFileMatch[3])return json(res,200,vectorStore.content(storeId,fileId));
-        if(req.method==='GET')return json(res,200,vectorStore.getFile(storeId,fileId));
-        if(req.method==='POST'&&!vectorFileMatch[3])return json(res,200,vectorStore.updateFile(storeId,fileId,await readBody(req,config.requestLimit)));
-        if(req.method==='DELETE'&&!vectorFileMatch[3])return json(res,200,vectorStore.deleteFile(storeId,fileId));
-        throw error(405,'向量库文件资源不支持此方法');
-      }
-      const vectorBatchMatch=/^\/v1\/vector_stores\/([^/]+)\/file_batches\/([^/]+)(\/(?:cancel|files))?$/.exec(path);
-      if(vectorBatchMatch){
-        let storeId,batchId;try{storeId=decodeURIComponent(vectorBatchMatch[1]);batchId=decodeURIComponent(vectorBatchMatch[2]);}catch{throw error(400,'向量库批次 ID 编码无效');}
-        if(req.method==='GET'&&vectorBatchMatch[3]==='/files'){
-          const options={limit:Number(requestUrl.searchParams.get('limit')||20),order:requestUrl.searchParams.get('order')||'desc',after:requestUrl.searchParams.get('after')||undefined,before:requestUrl.searchParams.get('before')||undefined,filter:requestUrl.searchParams.get('filter')||undefined};
-          if([...requestUrl.searchParams.keys()].some(key=>!['limit','order','after','before','filter'].includes(key)))throw error(400,'向量库批次文件分页参数无效');return json(res,200,vectorStore.listBatchFiles(storeId,batchId,options));
-        }
-        if(req.method==='GET'&&!vectorBatchMatch[3])return json(res,200,vectorStore.getBatch(storeId,batchId));
-        if(req.method==='POST'&&vectorBatchMatch[3]==='/cancel')return json(res,200,vectorStore.cancelBatch(storeId,batchId));
-        throw error(405,'向量库批次资源不支持此方法');
-      }
-      const vectorChildMatch=/^\/v1\/vector_stores\/([^/]+)\/(files|file_batches|search)$/.exec(path);
-      if(vectorChildMatch){
-        let storeId;try{storeId=decodeURIComponent(vectorChildMatch[1]);}catch{throw error(400,'向量库 ID 编码无效');}
-        if(vectorChildMatch[2]==='files'){
-          if(req.method==='POST')return json(res,200,await vectorStore.attach(storeId,await readBody(req,config.requestLimit)));
-          if(req.method==='GET'){
-            const options={limit:Number(requestUrl.searchParams.get('limit')||20),order:requestUrl.searchParams.get('order')||'desc',after:requestUrl.searchParams.get('after')||undefined,before:requestUrl.searchParams.get('before')||undefined,filter:requestUrl.searchParams.get('filter')||undefined};
-            if([...requestUrl.searchParams.keys()].some(key=>!['limit','order','after','before','filter'].includes(key)))throw error(400,'向量库文件分页参数无效');return json(res,200,vectorStore.listFiles(storeId,options));
-          }
-        }
-        if(vectorChildMatch[2]==='file_batches'&&req.method==='POST')return json(res,200,await vectorStore.createBatch(storeId,await readBody(req,config.requestLimit)));
-        if(vectorChildMatch[2]==='search'&&req.method==='POST')return json(res,200,vectorStore.search(storeId,await readBody(req,config.requestLimit)));
-        throw error(405,'向量库子资源不支持此方法');
-      }
-      const vectorMatch=/^\/v1\/vector_stores\/([^/]+)$/.exec(path);
-      if(vectorMatch){
-        let storeId;try{storeId=decodeURIComponent(vectorMatch[1]);}catch{throw error(400,'向量库 ID 编码无效');}
-        if(req.method==='GET')return json(res,200,vectorStore.get(storeId));
-        if(req.method==='POST')return json(res,200,vectorStore.update(storeId,await readBody(req,config.requestLimit)));
-        if(req.method==='DELETE')return json(res,200,vectorStore.delete(storeId));
-        throw error(405,'向量库资源不支持此方法');
-      }
-      if(path==='/v1/batches'){
-        if(req.method==='POST')return json(res,200,batchStore.create(await readBody(req,config.requestLimit)));
-        if(req.method==='GET'){
-          const limit=Number(requestUrl.searchParams.get('limit')||20),after=requestUrl.searchParams.get('after')||undefined;
-          if([...requestUrl.searchParams.keys()].some(key=>!['limit','after'].includes(key)))throw error(400,'Batch 分页参数无效');
-          return json(res,200,batchStore.list({limit,after}));
-        }
-        throw error(405,'Batch 集合不支持此方法');
-      }
-      const batchMatch=/^\/v1\/batches\/([^/]+)(\/cancel)?$/.exec(path);
-      if(batchMatch){
-        let batchId;try{batchId=decodeURIComponent(batchMatch[1]);}catch{throw error(400,'Batch ID 编码无效');}
-        if(req.method==='GET'&&!batchMatch[2])return json(res,200,batchStore.get(batchId));
-        if(req.method==='POST'&&batchMatch[2])return json(res,200,batchStore.cancel(batchId));
-        throw error(405,'Batch 资源不支持此方法');
       }
       if(req.method==='POST'&&path==='/v1/conversations'){
         if(!(config.responseStoreSize??128))throw error(400,'Conversations 需要启用响应存储');
@@ -872,11 +633,10 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         const output=[...originalItems.filter(entry=>entry?.role==='user'),item];
         return json(res,200,{id:`resp_${randomUUID().replaceAll('-','')}`,object:'response.compaction',created_at:Math.floor(Date.now()/1000),output,usage:compacted.usage});
       }
-      if (req.method !== 'POST' || !['/v1/chat/completions','/v1/completions','/v1/responses','/v1/messages'].includes(path)) throw error(404, '接口不存在');
+      if (req.method !== 'POST' || !['/v1/chat/completions','/v1/responses','/v1/messages'].includes(path)) throw error(404, '接口不存在');
       if (!tokenManager.configured) throw error(503, '请配置 GENAI_TOKEN 或 CAS 账号');
       let rawInput = await readBody(req,config.requestLimit);
       if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) throw error(400, '请求必须是 JSON 对象','body');
-      if(await idempotency.begin(req.headers['idempotency-key'],path,rawInput,res))return;
       if(path==='/v1/responses')rawInput={...rawInput,input:expandResponseState(rawInput.input)};
       let conversationId,conversationItems=[];
       if(path==='/v1/responses'&&rawInput.conversation!==undefined){
@@ -890,21 +650,17 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       rawInput=preparedFiles.input;
       const media=extractImages(path,rawInput);
       const input = normalizeRequest(path,media.input);
-      const fileSearch=path==='/v1/responses'?vectorStore.responseSearch(media.input):null;
-      if(fileSearch)input.messages=[{role:'system',content:fileSearch.context},...input.messages];
       let previous;
       if(path==='/v1/responses'&&media.input.previous_response_id){previous=responseStore.get(media.input.previous_response_id);if(!['completed','incomplete'].includes(previous.response.status))throw error(409,'previous_response_id 尚未完成');input.messages=[...previous.messages,...input.messages];}
       const formatPolicy=outputPolicy(path,media.input);
-      const legacy=path==='/v1/completions';
       const adapter = path === '/v1/responses'||path==='/v1/messages' ? new ProtocolOutput(path,input,async frame=>{
         if (!res.headersSent) res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no' });
         await write(res,frame);
-      },media.input,{fileSearchItem:fileSearch?.item,reasoningSecret:config.key}) : null;
+      },media.input,{reasoningSecret:config.key}) : null;
       const policy = toolPolicy(input.tools,input.tool_choice,input.parallel_tool_calls,input.max_tool_calls);
       const makeCallId=()=>`call_${randomUUID().replaceAll('-','')}`;
-      // Repair needs an atomic answer: once a tool is emitted clients may execute it.
-      const toolStream=input.stream&&policy&&!config.outputRepair?createToolCallStream(policy,makeCallId):null;
-      let streamedToolCalls=0,streamedText='',streamedReasoningLength=0,toolStreamError=null;
+      const toolStream=input.stream&&policy?createToolCallStream(policy,makeCallId):null;
+      let streamedToolCalls=0,streamedText='',streamedReasoningLength=0;
       const catalogue = await models();
       if (!catalogue.length) throw error(503, '模型目录没有已确认的自部署聊天模型');
       const defaultModel=catalogue.find(model=>model.primary!==false&&isKimiK3Model(model))
@@ -916,19 +672,11 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const outputReserve=input.max_tokens??input.max_completion_tokens??defaultOutput;
       if(input.max_tokens===undefined&&input.max_completion_tokens===undefined)input.max_tokens=outputReserve;
       // Validate before uploads, and count the actual prompt added by the bridge.
-      const preflight=upstreamBody(input,config,catalogue,formatPolicy);
       const promptSize=body=>estimateTokens({messages:body.messages,chatInfo:body.chatInfo});
-      const promptOverhead=Math.max(0,promptSize(preflight)-estimateTokens(input.messages));
-      const autoThreshold=Math.max(1,contextWindow-outputReserve-promptOverhead);
-      if(path==='/v1/responses'){
-        const configured=media.input.context_management?.find(item=>item.type==='compaction')?.compact_threshold;
-        const threshold=configured??(media.input.truncation==='auto'?autoThreshold:undefined);
-        if(threshold)input.messages=manageContextMessages(input.messages,Math.min(threshold,autoThreshold),config.contextStrategy??'agent');
-      }else if(config.contextAuto!==false)input.messages=manageContextMessages(input.messages,autoThreshold,config.contextStrategy??'agent');
       const inputEstimate=promptSize(upstreamBody(input,config,catalogue,formatPolicy));
       if(inputEstimate+outputReserve>contextWindow)throw Object.assign(error(400,
         `输入和输出额度超过模型 ${selected.id} 的上下文窗口（context_length_exceeded）：估算输入 ${inputEstimate} tokens，预留输出 ${outputReserve} tokens，上下文上限 ${contextWindow} tokens；请缩短最新请求、工具定义或工具结果，或降低输出 token 上限`,
-        path==='/v1/responses'?'input':legacy?'prompt':'messages'),{code:'context_length_exceeded'});
+        path==='/v1/responses'?'input':'messages'),{code:'context_length_exceeded'});
       const retainedImageInputs=retainedImages(media,input.messages);
       if(retainedImageInputs.length&&!selected.capabilities?.vision)throw error(400,`模型 ${selected.id} 未确认支持图片输入`,'model');
       if(path==='/v1/responses'&&media.input.background===true){
@@ -948,7 +696,6 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       const accessToken=await tokenManager.get(false,controller.signal);
       const automaticGroup=typeof (input.chat_group_id??config.group)==='string'&&!(input.chat_group_id??config.group).trim();
       if(automaticGroup)input.chat_group_id=newChatGroupId();
-      const recovery=config.historyFallback===false?null:{contextWindow,resetSession:automaticGroup};
       const fileIds=await uploadNativeFiles(preparedFiles.files,{chatGroupId:input.chat_group_id??config.group,aiType:selected.upstream_id||selected.id,accessToken,cookie:config.cookie,signal:controller.signal,fetcher});
       const imagePayload=await prepareImages(retainedImageInputs,config,accessToken,controller.signal,imageFetcher,frontendFetcher);
       const body = upstreamBody(input, config, catalogue, formatPolicy,{...imagePayload,...(fileIds.length?{fileIds}:{})});
@@ -957,22 +704,16 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         Referer: 'https://genai.shanghaitech.edu.cn/dashboard/analysis' };
       if (config.cookie) headers.Cookie = config.cookie;
       clearTimeout(timer);timer=undefined;
-      const source=withStreamTimeout(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config.upstreamRetries??2,()=>idempotency.dispatched(res),config,recovery),config.timeout??120000);
-      // Even an SSE heartbeat commits HTTP headers and prevents a repair error
-      // from being returned with its correct status before output is accepted.
-      const sourceEvents=input.stream&&(policy||formatPolicy)&&!config.outputRepair?withHeartbeats(source):source;
+      const source=withStreamTimeout(authenticatedEvents(fetcher,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'},tokenManager,config),config.timeout??120000);
+      const sourceEvents=input.stream&&(policy||formatPolicy)?withHeartbeats(source):source;
       const fallbackId=`chatcmpl-${randomUUID()}`;
       let streamId,streamCreated;
       const streamMeta=()=>({id:streamId||fallbackId,object:'chat.completion.chunk',created:streamCreated??Math.floor(Date.now()/1000),model:input.model||selected.id});
-      const legacyId=()=>streamMeta().id.replace(/^chatcmpl-/,'cmpl-');
       const emitToolCalls=async calls=>{
-        if(!calls.length||toolStreamError)return;
-        if(adapter)try{for(const call of calls)adapter.callItem(call);}catch(cause){
-          if(!config.outputRepair||cause.status!==502||res.headersSent)throw cause;
-          toolStreamError=cause;return;
-        }
+        if(!calls.length)return;
+        if(adapter)for(const call of calls)adapter.callItem(call);
         if(adapter)for(const call of calls)await adapter.toolCall(call);
-        else if(!legacy){
+        else{
           if(!res.headersSent)res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
           const delta={role:'assistant',tool_calls:calls.map((call,offset)=>({...call,index:streamedToolCalls+offset}))};
           const frame={...streamMeta(),choices:[{index:0,delta,logprobs:null,finish_reason:null}],...(input.stream_options?.include_usage?{usage:null}:{})};
@@ -1020,7 +761,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
           if(fragment.arguments!==undefined){if(typeof fragment.arguments!=='string')throw error(502,'上游函数参数无效');current.arguments+=fragment.arguments;responseBytes+=Buffer.byteLength(fragment.arguments);}
           nativeCalls.set(0,current);
         }
-        if(input.stream&&policy&&!formatPolicy&&!config.outputRepair&&nativeCalls.size){
+        if(input.stream&&policy&&!formatPolicy&&nativeCalls.size){
           const ready=[];
           for(let index=emittedNative.size;nativeCalls.has(index);index++){
             if(emittedNative.has(index))continue;
@@ -1044,25 +785,21 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         if (responseBytes > 8 * 1024 * 1024) throw error(502, '上游响应超过 8 MiB');
         if (!input.stream || policy || formatPolicy) text += content;
         if (!input.stream || policy || formatPolicy) reasoning += thought;
-        if(input.stream&&policy&&!formatPolicy&&!config.outputRepair&&thought){
+        if(input.stream&&policy&&!formatPolicy&&thought){
           if(adapter)await adapter.reasoningDelta(thought);
-          else if(!legacy){
+          else{
             if(!res.headersSent)res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
             const frame={...streamMeta(),choices:[{index:0,delta:{role:'assistant',reasoning_content:thought},logprobs:null,finish_reason:null}],...(input.stream_options?.include_usage?{usage:null}:{})};
             await write(res,`data: ${JSON.stringify(frame)}\n\n`);
           }
           streamedReasoningLength+=thought.length;
         }
-        if(toolStream&&content&&!nativeCalls.size&&!toolStreamError) {
-          let calls;
-          try{calls=toolStream.push(content);}catch(cause){
-            if(!config.outputRepair||res.headersSent)throw cause;
-            toolStreamError=cause;calls=[];
-          }
-          const visible=toolStreamError?'':toolStream.takeText();
+        if(toolStream&&content&&!nativeCalls.size) {
+          const calls=toolStream.push(content);
+          const visible=toolStream.takeText();
           if(visible&&!formatPolicy){
             if(adapter)await adapter.delta(visible);
-            else if(!legacy){
+            else{
               if(!res.headersSent)res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
               const frame={...streamMeta(),choices:[{index:0,delta:{role:'assistant',content:visible},logprobs:null,finish_reason:null}],...(input.stream_options?.include_usage?{usage:null}:{})};
               await write(res,`data: ${JSON.stringify(frame)}\n\n`);
@@ -1078,8 +815,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
           else {
             if (!res.headersSent) res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
             const publicChunk=suppressReasoning?{...chunk,...streamMeta(),choices:chunk.choices.map(value=>{const delta={...value.delta,role:'assistant'};delete delta.reasoning_content;delete delta.reasoning;delete delta.thinking;return{...value,delta,logprobs:value.logprobs??null};})}:{...chunk,...streamMeta(),choices:chunk.choices.map(value=>({...value,delta:{...value.delta,role:'assistant'},logprobs:value.logprobs??null}))};
-            const outbound=legacy?{id:legacyId(),object:'text_completion',created:streamMeta().created,model:streamMeta().model,choices:chunk.choices.map(value=>({index:value.index,text:value.delta?.content||'',logprobs:null,finish_reason:value.finish_reason})),...(input.stream_options?.include_usage?{usage:null}:{})}
-              :input.stream_options?.include_usage?{...publicChunk,usage:null}:publicChunk;
+            const outbound=input.stream_options?.include_usage?{...publicChunk,usage:null}:publicChunk;
             await write(res, `data: ${JSON.stringify(outbound)}\n\n`);
           }
         }
@@ -1093,25 +829,14 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
         if(!value.tool_calls.length)value.content=parseStructured(value.content,formatPolicy);
         return value;
       };
-      let parsed,repaired=false,repairPromptBytes=0;
-      try{
-        if(toolStreamError)throw toolStreamError;
-        parsed=nativePayload?parseToolCalls(nativePayload,policy,makeCallId):toolStream?toolStream.finish():parseToolCalls(bufferedText,policy,makeCallId);
-        if(nativePayload&&bufferedText.trim())parsed.content=bufferedText.trim();
-        parsed=validateOutput(parsed);
-      }catch(cause){
-        if(!config.outputRepair||cause.status!==502||res.headersSent||!policy&&!formatPolicy)throw cause;
-        const repair=await repairGeneratedOutput(fetcher,tokenManager,config,selected.upstream_id||selected.id,headers,body,nativePayload||bufferedText,cause.message,policy,formatPolicy,controller.signal,contextWindow,recovery);
-        parsed=validateOutput(parseToolCalls(repair.text,policy,makeCallId));
-        repaired=true;repairPromptBytes=repair.promptBytes;responseBytes+=Buffer.byteLength(repair.text)+Buffer.byteLength(repair.reasoning);
-        reasoning=suppressReasoning?'':repair.reasoning;
-        last={...repair.last,usage:undefined};
-      }
-      if(toolStream&&!repaired&&!nativeCalls.size&&!formatPolicy){
+      let parsed=nativePayload?parseToolCalls(nativePayload,policy,makeCallId):toolStream?toolStream.finish():parseToolCalls(bufferedText,policy,makeCallId);
+      if(nativePayload&&bufferedText.trim())parsed.content=bufferedText.trim();
+      parsed=validateOutput(parsed);
+      if(toolStream&&!nativeCalls.size&&!formatPolicy){
         const tail=toolStream.takeText();
         if(tail){
           if(adapter)await adapter.delta(tail);
-          else if(!legacy){
+          else{
             if(!res.headersSent)res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
             const frame={...streamMeta(),choices:[{index:0,delta:{role:'assistant',content:tail},logprobs:null,finish_reason:null}],...(input.stream_options?.include_usage?{usage:null}:{})};
             await write(res,`data: ${JSON.stringify(frame)}\n\n`);
@@ -1121,7 +846,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       const finish = parsed.tool_calls.length ? 'tool_calls' : last.choices?.[0]?.finish_reason || 'stop';
       const finalReasoning=adapter && input.stream && !policy && !formatPolicy ? adapter.reasoning : reasoning;
-      const promptEstimate=Math.ceil((Buffer.byteLength(JSON.stringify(input.messages))+repairPromptBytes)/3);
+      const promptEstimate=Math.ceil(Buffer.byteLength(JSON.stringify(input.messages))/3);
       const completionEstimate=Math.ceil(responseBytes/3);
       const normalizedUsage=chatUsage(last.usage,promptEstimate,completionEstimate,Math.ceil(Buffer.byteLength(finalReasoning||'')/3));
       const reportedPrompt=last.usage?.prompt_tokens??last.usage?.input_tokens,reportedCompletion=last.usage?.completion_tokens??last.usage?.output_tokens;
@@ -1153,24 +878,22 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
       }
       if(input.stream&&!adapter&&input.stream_options?.include_usage) {
         const usage=normalizedUsage;
-        const usageFrame=legacy?{id:legacyId(),object:'text_completion',created:streamMeta().created,model:streamMeta().model,choices:[],usage}:{...last,...streamMeta(),choices:[],usage};
+        const usageFrame={...last,...streamMeta(),choices:[],usage};
         await write(res,`data: ${JSON.stringify(usageFrame)}\n\n`);
       }
       if (input.stream) { await write(res, 'data: [DONE]\n\n'); res.end(); }
       else {
         res.setHeader('X-Usage-Source',usageSource);
-        const result=legacy?{id:completion.id.replace(/^chatcmpl-/,'cmpl-'),object:'text_completion',created:completion.created,model:completion.model,choices:[{index:0,text:parsed.content||'',logprobs:null,finish_reason:finish}],usage:normalizedUsage}:completion;
-        json(res,200,result);
+        json(res,200,completion);
       }
     } catch (e) {
-      idempotency.fail(res);
       const status = e.status || (controller?.signal.aborted ? timedOut?504:499 : 502),message=e.status?e.message:status===504?'上游请求超时':status===499?'客户端已断开':'无法连接上游服务';
       const codes={400:'invalid_request',401:'invalid_api_key',403:'permission_denied',404:'not_found',405:'method_not_allowed',409:'conflict',413:'request_too_large',429:'rate_limit_exceeded',499:'client_closed_request',502:'upstream_error',503:'service_unavailable',504:'timeout',507:'insufficient_storage'},code=e.status&&e.code?e.code:codes[status]||'server_error';
       const types={400:'invalid_request_error',401:'authentication_error',403:'permission_error',404:'not_found_error',405:'invalid_request_error',409:'conflict_error',413:'request_too_large',429:'rate_limit_error',499:'api_error',502:'api_error',503:'overloaded_error',504:'api_error',507:'api_error'};
       const payload = { ...(path === '/v1/messages' ? {type:'error'} : {}), error: { message,type:types[status]||'api_error',param:e.param??null,code } };
       if (!res.destroyed) {
         if(res.headersSent){
-          if(['/v1/chat/completions','/v1/completions'].includes(path))res.end(`data: ${JSON.stringify(payload)}\n\n`);
+          if(path==='/v1/chat/completions')res.end(`data: ${JSON.stringify(payload)}\n\n`);
           else if(path==='/v1/responses')res.end(`event: error\ndata: ${JSON.stringify({type:'error',code,message,param:e.param??null})}\n\n`);
           else res.end(`event: error\ndata: ${JSON.stringify(payload)}\n\n`);
         } else {if(status===401)res.setHeader('WWW-Authenticate','Bearer');if(e.retryAfter||status===429)res.setHeader('Retry-After',String(e.retryAfter??1));json(res, status, payload);}
@@ -1178,7 +901,7 @@ export function createServer(config = configuration(), fetcher = upstreamFetch, 
     } finally { clearTimeout(timer); controller?.abort(); release?.(); }
   });
   server.checkUpstream = probeUpstream;
-  server.once('close',()=>{batchStore.close();releaseDisk?.();});
+  server.once('close',()=>releaseDisk?.());
   return server;
   }catch(cause){releaseDisk?.();throw cause;}
 }
@@ -1199,14 +922,6 @@ export function startServer(config = configuration()) {
   if (!Number.isInteger(config.fileMaxBytes) || config.fileMaxBytes < 1024 || config.fileMaxBytes > 10*1048576) throw new Error('GENAI_FILE_MAX_MB 必须为 0.001–10');
   if (!Number.isSafeInteger(config.dataQuotaBytes??0) || (config.dataQuotaBytes??0)<0 || (config.dataQuotaBytes??0)>1024*1024*1024*1024) throw new Error('GENAI_DATA_QUOTA_MB 必须为 0–1048576');
   if (!Number.isInteger(config.pdfMaxPages) || config.pdfMaxPages < 1 || config.pdfMaxPages > 2000) throw new Error('GENAI_PDF_MAX_PAGES 必须为 1–2000 的整数');
-  if (!Number.isInteger(config.batchStoreSize) || config.batchStoreSize < 0 || config.batchStoreSize > 1000) throw new Error('GENAI_BATCH_STORE_SIZE 必须为 0–1000 的整数');
-  if (!Number.isFinite(config.batchStoreTtl) || config.batchStoreTtl < 3600000 || config.batchStoreTtl > 2592000000) throw new Error('GENAI_BATCH_STORE_TTL_MS 必须为 1 小时–30 天');
-  if (!Number.isInteger(config.vectorStoreSize) || config.vectorStoreSize < 0 || config.vectorStoreSize > 1000) throw new Error('GENAI_VECTOR_STORE_SIZE 必须为 0–1000 的整数');
-  if (!Number.isFinite(config.vectorStoreTtl) || config.vectorStoreTtl < 3600000 || config.vectorStoreTtl > 31536000000) throw new Error('GENAI_VECTOR_STORE_TTL_MS 必须为 1 小时–365 天');
-  if (!Number.isInteger(config.vectorStoreMaxFiles) || config.vectorStoreMaxFiles < 1 || config.vectorStoreMaxFiles > 10000) throw new Error('GENAI_VECTOR_STORE_MAX_FILES 必须为 1–10000 的整数');
-  if (!Number.isInteger(config.upstreamRetries) || config.upstreamRetries < 0 || config.upstreamRetries > 5) throw new Error('GENAI_UPSTREAM_RETRIES 必须为 0–5 的整数');
-  if (typeof config.contextAuto!=='boolean') throw new Error('GENAI_CONTEXT_AUTO 必须为布尔值');
-  if (!['agent','recent'].includes(config.contextStrategy)) throw new Error('GENAI_CONTEXT_STRATEGY 必须为 agent 或 recent');
   if (config.corsOrigin && config.corsOrigin!=='*') { let origin;try{origin=new URL(config.corsOrigin);}catch{throw new Error('CORS_ORIGIN 必须是完整来源或 *');}if(origin.origin!==config.corsOrigin)throw new Error('CORS_ORIGIN 只能包含协议、主机和端口'); }
   const server=createServer(config);
   server.listen(config.port, config.host, () => {

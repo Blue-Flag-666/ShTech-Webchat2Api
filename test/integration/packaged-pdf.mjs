@@ -14,11 +14,11 @@ export async function checkPackagedPdf(base, key) {
   form.append('purpose', 'assistants');
   form.append('file', new File([simplePdf('Packaged PDF compression verification')], 'runtime.pdf', { type: 'application/pdf' }));
   const file = await request('/v1/files', { method: 'POST', body: form });
-  const store = await request('/v1/vector_stores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_ids: [file.id] }) });
-  assert.equal(store.file_counts.completed, 1);
-  const result = await request(`/v1/vector_stores/${store.id}/search`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: 'compression verification' }) });
-  assert.equal(result.data[0]?.file_id, file.id);
-  console.log('Packaged PDF extraction and search passed');
+  const count = async input => request('/v1/responses/input_tokens', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input})});
+  const empty = await count('');
+  const parsed = await count([{role:'user',content:[{type:'input_file',file_id:file.id}]}]);
+  assert.ok(parsed.input_tokens > empty.input_tokens + 10, 'PDF text must contribute to the input estimate');
+  console.log('Packaged PDF extraction passed without upstream requests');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

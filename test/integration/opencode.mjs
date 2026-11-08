@@ -25,7 +25,7 @@ const selected=modelDirectory(records).find(model=>model.primary&&model.id===mod
 assert.ok(selected,'CI model must be a confirmed school model fixture');
 const edited=`${sentinel}_EDITED`;
 let toolRequests=0,resultReturned=false,child,childClosed;
-const server=createServer({key:'ci-local-key',token:'ci-placeholder',group:'',timeout:10000,contextAuto:true},async(url,options)=>{
+const server=createServer({key:'ci-local-key',token:'ci-placeholder',group:'',timeout:10000},async(url,options)=>{
   assert.equal(new URL(url).pathname,'/htk/chat/start/chat');
   const body=JSON.parse(options.body);
   assert.equal(body.aiType,selected.upstream_id);assert.equal(body.rootAiType,'xinference');

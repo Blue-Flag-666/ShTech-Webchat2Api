@@ -66,16 +66,12 @@ try{
   form.append('file',new File([archive],'package-check.zip',{type:'application/zip'}));
   const file=await request('/v1/files',{method:'POST',body:form});
   assert.equal(file.filename,'package-check.zip');
-  const store=await request('/v1/vector_stores',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'packaged-runtime',file_ids:[file.id]})});
-  assert.equal(store.file_counts.completed,1);
-  const search=await request(`/v1/vector_stores/${store.id}/search`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'deployment'})});
-  assert.equal(search.data[0].file_id,file.id);
+  const estimate=async()=>request('/v1/responses/input_tokens',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input:[{role:'user',content:[{type:'input_file',file_id:file.id}]}]})});
+  const extracted=await estimate();assert.ok(extracted.input_tokens>10);
   await stop();launch();await waitReady();
   assert.equal((await request(`/v1/files/${file.id}`)).filename,'package-check.zip');
-  assert.equal((await request(`/v1/vector_stores/${store.id}`)).file_counts.completed,1);
-  const restored=await request(`/v1/vector_stores/${store.id}/search`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'deployment'})});
-  assert.equal(restored.data[0].file_id,file.id);
-  console.log('Packaged executable: configuration, startup, ZIP extraction and persisted file/index recovery passed');
+  assert.equal((await estimate()).input_tokens,extracted.input_tokens);
+  console.log('Packaged executable: configuration, startup, ZIP extraction and persisted file recovery passed');
 }catch(cause){throw new Error(`${cause.message}\nPackaged service output:\n${output}`,{cause});}
 finally{
   await stop();

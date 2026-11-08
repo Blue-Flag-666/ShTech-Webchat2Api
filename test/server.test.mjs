@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { createServer, events, upstreamBody, manageContextMessages, parseRetryAfter } from '../src/server.mjs';
+import { createServer, events, upstreamBody, parseRetryAfter } from '../src/server.mjs';
 import { TokenManager } from '../src/auth.mjs';
 import { listenForFetch, confirmedModels } from './fixtures.mjs';
 
@@ -10,7 +10,61 @@ const request = { model: 'qwen-instruct', messages: [{role:'user',content:'你�
 const chunk = (content, finish = null) => ({ id:'chatcmpl-test', object:'chat.completion.chunk', model:'qwen-instruct', created:123, choices:[{index:0,delta:{content},finish_reason:finish}] });
 const sse = values => values.map(v => `data: ${typeof v === 'string' ? v : JSON.stringify(v)}\n\n`).join('');
 
-test('无 v1 前缀的兼容路径保留鉴权、模型预算和跨路径幂等',async()=>{
+test('已删除的辅助接口返回 404，且不访问聊天上游',async()=>{
+  let calls=0;
+  await withServer(async()=>{calls++;throw new Error('不应请求上游');},async(_call,base)=>{
+    for(const [method,path] of [['GET','/metrics'],['POST','/v1/completions'],['POST','/v1/uploads'],['POST','/v1/batches'],['GET','/v1/vector_stores']]){
+      const response=await fetch(base+path,{method,headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json'},...(method==='POST'?{body:'{}'}:{})});
+      assert.equal(response.status,404,path);await response.text();
+    }
+  });
+  assert.equal(calls,0);
+});
+
+test('生成错误、空流、协议错误和连接故障不自动重试，幂等头不拦截后续请求',async()=>{
+  for(const mode of ['http','business','empty','protocol','network']){
+    let calls=0;
+    await withServer(async()=>{
+      calls++;
+      if(mode==='network')throw Object.assign(new Error('connection reset'),{code:'ECONNRESET'});
+      if(mode==='http')return new Response('backend failed',{status:503});
+      return new Response(mode==='business'?sse([{code:500,message:'backend failed'}]):mode==='protocol'?'data: not-json\n\n':'',{headers:{'content-type':'text/event-stream'}});
+    },async(_call,base)=>{
+      for(let i=0;i<2;i++){
+        const response=await fetch(base+'/v1/chat/completions',{method:'POST',headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json','idempotency-key':'same-key'},body:JSON.stringify({...request,messages:[{role:'user',content:'old question'},{role:'assistant',content:'old answer'},{role:'user',content:'continue'}]})});
+        assert.equal(response.status,mode==='http'?503:mode==='business'?500:502);await response.text();assert.equal(calls,i+1);
+      }
+    });
+    assert.equal(calls,2,mode);
+  }
+});
+
+test('完整历史原样保留，超长历史直接拒绝且不删减',async()=>{
+  const messages=[{role:'system',content:'project constraints'},{role:'user',content:'old context '.repeat(1000)},{role:'assistant',content:'retained answer'},{role:'user',content:'continue'}];
+  let calls=0;
+  await withServer(async(_url,options)=>{
+    calls++;const body=JSON.parse(options.body);assert.deepEqual(body.messages,messages.slice(0,-1));assert.equal(body.chatInfo,'continue');
+    return new Response(sse([chunk('done','stop')]),{headers:{'content-type':'text/event-stream'}});
+  },async call=>{assert.equal((await call({...request,messages,max_tokens:32})).status,200);});
+  assert.equal(calls,1);
+  await withServer(async()=>{calls++;throw new Error('不应调用上游');},async call=>{
+    const response=await call({...request,messages,max_tokens:32});assert.equal(response.status,400);assert.equal((await response.json()).error.code,'context_length_exceeded');
+  },{modelFetcher:async()=>({success:true,result:{records:[{aiType:request.model,rootAiType:'xinference',maxToken:600}]}})});
+  assert.equal(calls,1);
+});
+
+test('工具参数或结构化输出无效时直接报错，不调用模型修复',async()=>{
+  for(const mode of ['tools','schema']){
+    let calls=0;
+    await withServer(async()=>{calls++;return new Response(sse([chunk(mode==='tools'?'<tool_call>{"name":"missing","arguments":{}}</tool_call>':'{"answer":"wrong"}','stop')]),{headers:{'content-type':'text/event-stream'}});},async call=>{
+      const options=mode==='tools'?{tools:[{type:'function',function:{name:'run',parameters:{type:'object'}}}],tool_choice:'required'}:{response_format:{type:'json_schema',json_schema:{name:'answer',strict:true,schema:{type:'object',properties:{answer:{type:'integer'}},required:['answer'],additionalProperties:false}}}};
+      const response=await call({...request,...options});assert.equal(response.status,502);await response.text();
+    });
+    assert.equal(calls,1);
+  }
+});
+
+test('无 v1 前缀的兼容路径保留鉴权、模型预算',async()=>{
   let calls=0;
   const server=createServer(config,async()=>{calls++;return new Response(sse([chunk('你好'),chunk('', 'stop')]),{headers:{'content-type':'text/event-stream'}});},confirmedModels);
   await listenForFetch(server);
@@ -24,78 +78,15 @@ test('无 v1 前缀的兼容路径保留鉴权、模型预算和跨路径幂等'
     assert.equal(listing.data[0].max_output_tokens,4096);
     assert.deepEqual(listing.data[0].limit,{context:16384,output:4096});
     const model=await(await fetch(`${base}/models/qwen-instruct`,{headers})).json();assert.equal(model.max_completion_tokens,4096);
-    const options={method:'POST',headers:{...headers,'idempotency-key':'alias-roundtrip'},body:JSON.stringify(request)};
+    const options={method:'POST',headers:{...headers},body:JSON.stringify(request)};
     const first=await(await fetch(`${base}/chat/completions`,options)).json();
     const repeated=await(await fetch(`${base}/v1/chat/completions`,options)).json();
-    assert.equal(first.choices[0].message.content,'你好');assert.equal(repeated.id,first.id);assert.equal(calls,1);
+    assert.equal(first.choices[0].message.content,'你好');assert.equal(repeated.choices[0].message.content,first.choices[0].message.content);assert.equal(calls,2);
     const estimate=await fetch(`${base}/tokenizers/estimate-token-count`,{method:'POST',headers,body:JSON.stringify(request)});
-    assert.equal(estimate.status,200);assert.ok((await estimate.json()).data.total_tokens>0);assert.equal(calls,1);
+    assert.equal(estimate.status,200);assert.ok((await estimate.json()).data.total_tokens>0);assert.equal(calls,2);
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
 
-test('上下文截断保留完整工具轮次、最近请求和关键错误',()=>{
-  const messages=[
-    {role:'system',content:'必须遵守仓库规则'},
-    {role:'user',content:'运行测试'},
-    {role:'assistant',content:null,tool_calls:[{id:'call_test',type:'function',function:{name:'shell',arguments:'{}'}}]},
-    {role:'tool',tool_call_id:'call_test',content:`开始\n${'普通日志\n'.repeat(1000)}ERROR: test failed at src/main.ts:3\n${'普通日志\n'.repeat(1000)}`},
-    {role:'user',content:'继续修复'}
-  ];
-  const compact=manageContextMessages(messages,1200,'agent');
-  assert.equal(compact[0].role,'system');assert.equal(compact.at(-1).content,'继续修复');
-  assert.equal(compact.some(message=>message.role==='assistant'&&message.tool_calls),compact.some(message=>message.role==='tool'));
-  assert.ok(compact.some(message=>message.role==='tool'&&message.content.includes('ERROR: test failed')));
-  assert.ok(compact.some(message=>message.role==='tool'&&message.content.includes('middle omitted')));
-  const recent=manageContextMessages(messages,1200,'recent');
-  assert.equal(recent.some(message=>message.role==='assistant'&&message.tool_calls),recent.some(message=>message.role==='tool'));
-});
-test('agent 上下文策略可跳过冗长旧轮次并保留更早的测试错误',()=>{
-  const messages=[{role:'system',content:'规则'},{role:'developer',content:'开发规范'},
-    {role:'user',content:'ERROR: test failed at src/main.ts:3'},{role:'assistant',content:'待修复'},
-    {role:'user',content:'普通背景'.repeat(1000)},{role:'assistant',content:'收到'},
-    {role:'user',content:'继续'}];
-  const agent=manageContextMessages(messages,200,'agent');
-  const recent=manageContextMessages(messages,200,'recent');
-  assert.ok(agent.some(message=>message.content?.includes('test failed')));
-  assert.ok(!recent.some(message=>message.content?.includes('test failed')));
-  assert.ok(agent.some(message=>message.role==='developer'&&message.content==='开发规范'));
-  assert.equal(agent.at(-1).content,'继续');
-});
-test('最新轮次的大型工具结果会继续压缩且保留调用与错误',()=>{
-  const messages=[
-    {role:'system',content:'按测试错误修复'},
-    {role:'user',content:'运行测试'},
-    {role:'assistant',content:null,tool_calls:[{id:'call_test',type:'function',function:{name:'shell',arguments:'{}'}}]},
-    {role:'tool',tool_call_id:'call_test',content:`开始\n${'普通输出\n'.repeat(5000)}ERROR: test failed at src/main.ts:3\n${'普通输出\n'.repeat(5000)}`}
-  ];
-  const compact=manageContextMessages(messages,250,'agent');
-  assert.equal(compact.find(message=>message.role==='assistant').tool_calls[0].id,'call_test');
-  const result=compact.find(message=>message.role==='tool');
-  assert.equal(result.tool_call_id,'call_test');
-  assert.match(result.content,/test failed at src\/main\.ts:3/);
-  assert.ok(result.content.length<512);
-});
-test('Chat 自动缩减长历史，关闭后明确拒绝超长输入',async()=>{
-  const modelFetcher=async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:200}]}});
-  const messages=[{role:'user',content:'旧内容'.repeat(500)},{role:'assistant',content:'旧回答'},{role:'user',content:'新问题'}];
-  let calls=0;
-  await withServer(async(_url,options)=>{
-    calls++;
-    const body=JSON.parse(options.body);
-    assert.equal(body.messages.some(message=>message.content?.includes('旧内容')),false);
-    assert.equal(body.chatInfo,'新问题');
-    return new Response(sse([chunk('完成','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call({model:'qwen-instruct',messages,max_tokens:30});assert.equal(response.status,200);
-  },{modelFetcher,contextAuto:true});
-  assert.equal(calls,1);
-  await withServer(async()=>{calls++;throw new Error('超长请求不应调用上游');},async call=>{
-    const response=await call({model:'qwen-instruct',messages,max_tokens:30});
-    assert.equal(response.status,400);
-    assert.equal((await response.json()).error.param,'messages');
-  },{modelFetcher,contextAuto:false});
-  assert.equal(calls,1);
-});
 test('最新请求仍超过模型窗口时明确拒绝且不调用上游',async()=>{
   let calls=0;
   const modelFetcher=async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:200}]}});
@@ -114,20 +105,6 @@ test('Retry-After 同时解析秒数和 HTTP 日期',()=>{
   assert.equal(parseRetryAfter(new Date(now+5000).toUTCString(),now),5000);
   assert.equal(parseRetryAfter('invalid',now),null);
   assert.equal(parseRetryAfter(null,now),null);
-});
-
-test('上下文预算同时保留 max_completion_tokens 输出额度并截断旧历史',async()=>{
-  const modelFetcher=async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:600}]}});
-  let attempts=0;
-  await withServer(async(_url,options)=>{
-    attempts++;const body=JSON.parse(options.body);
-    assert.equal(body.maxToken,400);assert.equal(body.messages.some(message=>message.content?.includes('旧背景')),false);
-    assert.equal(body.chatInfo,'新请求');return new Response(sse([chunk('完成','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call({...request,max_completion_tokens:400,messages:[{role:'user',content:'旧背景'.repeat(80)},{role:'assistant',content:'收到'},{role:'user',content:'新请求'}]});
-    assert.equal(response.status,200);
-  },{modelFetcher});
-  assert.equal(attempts,1);
 });
 
 test('超出窗口的工具提示词在发送上游前返回明确错误',async()=>{
@@ -198,7 +175,7 @@ test('上游要求长时间限流时直接转发 Retry-After，不抢先重试',
   let attempts=0;
   await withServer(async()=>{attempts++;return new Response('',{status:429,headers:{'retry-after':'60'}});},async call=>{
     const response=await call();assert.equal(response.status,429);assert.equal(response.headers.get('retry-after'),'60');
-  },{upstreamRetries:2,timeout:5000});
+  },{timeout:5000});
   assert.equal(attempts,1);
 });
 test('上游 502、503、504 的等待时间透传给客户端',async()=>{
@@ -206,7 +183,7 @@ test('上游 502、503、504 的等待时间透传给客户端',async()=>{
     let attempts=0;
     await withServer(async()=>{attempts++;return new Response('',{status,headers:{'retry-after':'60'}});},async call=>{
       const response=await call();assert.equal(response.status,status);assert.equal(response.headers.get('retry-after'),'60');
-    },{upstreamRetries:2,timeout:5000});
+    },{timeout:5000});
     assert.equal(attempts,1);
   }
 });
@@ -219,7 +196,7 @@ test('连续上游故障不熔断，每次请求都返回上游实际错误并�
       const value=await response.json();assert.equal(value.error.message,'worker restarting');assert.equal(value.error.code,'backend_unavailable');
     }
     const recovered=await call();assert.equal(recovered.status,200);assert.equal((await recovered.json()).choices[0].message.content,'恢复');
-  },{upstreamRetries:0});
+  },{});
   assert.equal(attempts,6);
 });
 test('HTTP 错误与 SSE 业务错误在三个协议中保留上游状态、错误码及脱敏消息',async()=>{
@@ -237,7 +214,7 @@ test('HTTP 错误与 SSE 业务错误在三个协议中保留上游状态、错�
       assert.equal(response.status,500);const value=await response.json();assert.equal(value.error.code,500);
       assert.equal(value.error.message,'backend refused [redacted] [redacted]');
     }
-  },{upstreamRetries:0});
+  },{});
 });
 test('协议格式错误后下一次请求仍可正常响应',async()=>{
   let attempts=0;
@@ -246,7 +223,7 @@ test('协议格式错误后下一次请求仍可正常响应',async()=>{
     assert.equal((await call()).status,502);
     const recovered=await call();assert.equal(recovered.status,200);
     assert.equal((await recovered.json()).choices[0].message.content,'恢复');
-  },{upstreamRetries:0});
+  },{});
   assert.equal(attempts,3);
 });
 
@@ -263,7 +240,7 @@ test('SSE 心跳、前置状态、嵌套正文和缺省 index 可混合且不丢
     const response=await call();assert.equal(response.status,200);
     const value=await response.json();assert.equal(value.choices[0].message.content,'正常回答');
     assert.equal(value.choices[0].message.reasoning_content,'分析');
-  },{upstreamRetries:0});
+  },{});
 });
 
 test('包装中的 SSE 401 可刷新登录，业务 503 不会被当作心跳忽略',async()=>{
@@ -272,41 +249,21 @@ test('包装中的 SSE 401 可刷新登录，业务 503 不会被当作心跳忽
   await withServer(async()=>new Response(++attempts===1?sse([{success:true,result:{code:'401',msg:'expired'}}]):sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
     const response=await call();assert.equal(response.status,200);
     assert.equal((await response.json()).choices[0].message.content,'恢复');
-  },{tokenManager:manager,upstreamRetries:0});
+  },{tokenManager:manager});
   assert.equal(logins,1);assert.equal(attempts,2);
   await withServer(async()=>new Response(sse([{success:true,result:{code:503,message:'private server message'}}]),{headers:{'content-type':'text/event-stream'}}),async call=>{
     const response=await call();assert.equal(response.status,503);
     assert.match((await response.json()).error.message,/private server message/);
-  },{upstreamRetries:0});
+  },{});
 });
 
-test('首个输出前协议错误最多重试一次，输出后不重放',async()=>{
-  let attempts=0;
-  await withServer(async()=>new Response(++attempts===1?sse([{unrecognized:'private text'}]):sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
-    const response=await call();assert.equal(response.status,200);
-    assert.equal((await response.json()).choices[0].message.content,'恢复');
-  },{upstreamRetries:2,timeout:5000});
-  assert.equal(attempts,2);
-  attempts=0;
-  await withServer(async()=>{attempts++;return new Response(sse([{unrecognized:'private text'}]),{headers:{'content-type':'text/event-stream'}});},async call=>{
-    const response=await call();assert.equal(response.status,502);
-    assert.doesNotMatch((await response.json()).error.message,/private text/);
-  },{upstreamRetries:2,timeout:5000});
-  assert.equal(attempts,2);
-  attempts=0;
-  await withServer(async()=>{attempts++;return new Response(sse([chunk('部分'),{unrecognized:'private text'}]),{headers:{'content-type':'text/event-stream'}});},async call=>{
-    const response=await call({...request,stream:true});
-    const body=await response.text();assert.match(body,/部分/);assert.match(body,/upstream_error/);
-  },{upstreamRetries:2,timeout:5000});
-  assert.equal(attempts,1);
-});
 test('连续缺少完成标记的 SSE 每次都返回真实流错误',async()=>{
   let attempts=0;
   await withServer(async()=>{attempts++;return new Response(sse([chunk('未完成')]),{headers:{'content-type':'text/event-stream'}});},async call=>{
     assert.equal((await call()).status,502);
     assert.equal((await call()).status,502);
     assert.equal((await call()).status,502);
-  },{upstreamRetries:0});
+  },{});
   assert.equal(attempts,3);
 });
 test('模型专属队列让其他模型在空闲全局槽位继续运行',async()=>{
@@ -353,7 +310,7 @@ test('流式及非流式长回答持续输出时不受请求总时长限制',asy
       const response=await call({...request,stream});assert.equal(response.status,200);
       if(stream){const body=await response.text();assert.match(body,/\[DONE\]/);assert.doesNotMatch(body,/timeout|超时/);}
       else assert.equal((await response.json()).choices[0].message.content,'持续'.repeat(12));
-    },{timeout:250,upstreamRetries:0});
+    },{timeout:250});
   }
 });
 
@@ -372,7 +329,7 @@ test('上游停止输出或只发心跳时仍会超时，并取消上游连接',
       if(mode==='partial'){assert.equal(response.status,200);const body=await response.text();assert.match(body,/部分/);assert.match(body,/timeout/);}
       else{assert.equal(response.status,504);assert.equal((await response.json()).error.code,'timeout');}
       assert.equal(signal.aborted,true);
-    },{timeout:150,upstreamRetries:0});
+    },{timeout:150});
   }
 });
 
@@ -391,7 +348,7 @@ test('反复切换四种模型默认会话互不复用，请求参数错误不�
       if(model==='chatglm'&&round<2){assert.equal(response.status,500);assert.equal(value.error.code,500);assert.match(value.error.message,/参数不合法 private details/);}
       else{assert.equal(response.status,200);assert.equal(value.choices[0].message.content,model==='kimi-k3'?'Kimi-k3':model);}
     }
-  },{group:'',upstreamRetries:0,modelFetcher:async()=>({success:true,result:{records}})});
+  },{group:'',modelFetcher:async()=>({success:true,result:{records}})});
   assert.equal(groups.size,12);assert.deepEqual(routes,Array.from({length:3},()=>records.map(record=>record.aiType)).flat());
 });
 
@@ -415,22 +372,8 @@ test('并发切换模型时迟到的旧 token 401 复用已刷新的登录',asyn
     const responses=await Promise.all([first,second]);
     for(const response of responses){assert.equal(response.status,200);await response.json();}
     assert.equal(logins,1);
-  },{tokenManager:manager,concurrency:2,group:'',timeout:5000,upstreamRetries:0,modelFetcher:async()=>({success:true,result:{records}})});}
+  },{tokenManager:manager,concurrency:2,group:'',timeout:5000,modelFetcher:async()=>({success:true,result:{records}})});}
   finally{releaseA();}
-});
-
-test('SSE 业务繁忙在输出前按预算重试，输出后不重放',async()=>{
-  let attempts=0;
-  const busy={success:false,code:500,message:'模型服务繁忙 private details'};
-  await withServer(async()=>new Response(++attempts===1?sse([busy]):sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
-    const response=await call();assert.equal(response.status,200);assert.equal((await response.json()).choices[0].message.content,'恢复');
-  },{upstreamRetries:1,timeout:5000});
-  assert.equal(attempts,2);attempts=0;
-  await withServer(async()=>{attempts++;return new Response(sse([chunk('部分'),busy]),{headers:{'content-type':'text/event-stream'}});},async call=>{
-    const response=await call({...request,stream:true}),body=await response.text();
-    assert.match(body,/部分/);assert.match(body,/"code":500/);assert.match(body,/模型服务繁忙 private details/);
-  },{upstreamRetries:2,timeout:5000});
-  assert.equal(attempts,1);
 });
 
 test('上游诊断默认关闭，显式开启时只记录脱敏错误字段和重试标识',async()=>{
@@ -449,69 +392,11 @@ test('上游诊断默认关闭，显式开启时只记录脱敏错误字段和�
           assert.match(value.errors[0],/backend failure/);
           assert.doesNotMatch(diagnostic[0],/local-test|upstream-test|private prompt contents/);
         }
-      },{debugUpstream,upstreamRetries:0});
+      },{debugUpstream});
     }
   }finally{console.warn=original;}
 });
 
-test('四种模型的历史触发无说明 500 时保留完整历史，用新会话文本恢复一次',async()=>{
-  const records=['chatglm','qwen-instruct','deepseek-pro','Kimi-k3'].map(aiType=>({aiType,rootAiType:'xinference',maxToken:524288,enableDeepThink:1}));
-  for(const record of records){
-    const bodies=[];
-    await withServer(async(_url,options)=>{
-      const body=JSON.parse(options.body);bodies.push(body);
-      if(bodies.length===1){assert.equal(body.messages.length,9);return new Response(sse([{success:false,code:500}]),{headers:{'content-type':'text/event-stream'}});}
-      assert.equal(bodies.length,2);assert.deepEqual(body.messages,[bodies[0].messages[0]]);
-      assert.ok(body.chatInfo.includes(JSON.stringify(bodies[0].messages)));
-      assert.ok(body.chatInfo.endsWith(bodies[0].chatInfo));
-      assert.notEqual(body.chatGroupId,bodies[0].chatGroupId);
-      assert.equal(body.aiType,record.aiType);assert.equal(body.maxToken,2876);assert.equal(body.thinking,false);
-      return new Response(sse([chunk('历史已保留，继续回答','stop')]),{headers:{'content-type':'text/event-stream'}});
-    },async call=>{
-      const messages=[{role:'system',content:'请保留项目约束'}];
-      for(let i=0;i<4;i++)messages.push({role:'user',content:`历史问题 ${i}`},{role:'assistant',content:`历史回答 ${i}`,reasoning_content:`历史思考 ${i}`});
-      messages.push({role:'user',content:'继续工作'});
-      const response=await call({model:record.aiType,max_tokens:2876,thinking:{type:'disabled'},messages});
-      assert.equal(response.status,200);assert.equal((await response.json()).choices[0].message.content,'历史已保留，继续回答');
-    },{group:'',upstreamRetries:2,timeout:5000,modelFetcher:async()=>({success:true,result:{records}})});
-    assert.equal(bodies.length,2);
-  }
-});
-
-test('历史兼容恢复失败不重复重放，显式会话 ID 保持不变',async()=>{
-  for(const historyFallback of [true,false]){
-    const bodies=[];
-    await withServer(async(_url,options)=>{
-      bodies.push(JSON.parse(options.body));return new Response(sse([{success:false,code:500}]),{headers:{'content-type':'text/event-stream'}});
-    },async call=>{
-      const response=await call({...request,chat_group_id:'explicit-session',messages:[{role:'user',content:'旧问题'},{role:'assistant',content:'旧回答'},{role:'user',content:'继续'}]});
-      assert.equal(response.status,500);await response.json();
-    },{historyFallback,upstreamRetries:1,timeout:5000});
-    assert.equal(bodies.length,2);
-    assert.equal(bodies[1].chatGroupId,'explicit-session');
-    assert.equal(bodies[1].messages.length,historyFallback?0:2);
-  }
-});
-
-test('已输出内容后不切换历史格式',async()=>{
-  let attempts=0;
-  const messages=[{role:'user',content:'之前'},{role:'assistant',content:'回答'},{role:'user',content:'继续'}];
-  await withServer(async()=>{attempts++;return new Response(sse([chunk('部分'),{code:500,success:false}]),{headers:{'content-type':'text/event-stream'}});},async call=>{
-    const response=await call({...request,messages,stream:true}),body=await response.text();assert.match(body,/部分/);assert.match(body,/业务码 500/);
-  },{upstreamRetries:2,timeout:5000});
-  assert.equal(attempts,1);
-});
-
-test('完整文本历史恢复超过上下文窗口时不重发、不截断历史',async()=>{
-  const input={...request,max_tokens:30,messages:[{role:'user',content:'历史问题'},{role:'assistant',content:'历史回答'},{role:'user',content:'继续'}]};
-  const body=upstreamBody(input,config,[{id:'qwen-instruct',max_tokens:100000}]);
-  const context=Math.ceil(Buffer.byteLength(JSON.stringify({messages:body.messages,chatInfo:body.chatInfo}))/3)+35;
-  let attempts=0;
-  await withServer(async()=>{attempts++;return new Response(sse([{success:false,code:500}]),{headers:{'content-type':'text/event-stream'}});},async call=>{
-    const response=await call(input);assert.equal(response.status,500);await response.json();
-  },{contextAuto:false,upstreamRetries:2,modelFetcher:async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:context}]}})});
-  assert.equal(attempts,1);
-});
 test('未配置会话 ID 时每个请求生成网页式 ID，显式 ID 保持不变',async()=>{
   const groups=[];
   await withServer(async(_url,options)=>{
@@ -533,59 +418,6 @@ test('损坏的 JSON 指向 body，且不会请求学校模型',async()=>{
     const payload=await response.json();assert.equal(payload.error.param,'body');assert.equal(payload.error.code,'invalid_request');
   });
   assert.equal(calls,0);
-});
-test('幂等键重放同一 Chat 响应，并拒绝相同键的不同请求体',async()=>{
-  let calls=0;
-  await withServer(async()=>{calls++;return new Response(sse([chunk('完成','stop')]),{headers:{'content-type':'text/event-stream'}});},async(_call,base)=>{
-    const send=(body,key)=>fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json','Idempotency-Key':key},body:JSON.stringify(body)});
-    const first=await send(request,'chat-retry-1');const original=await first.json();
-    const second=await send(request,'chat-retry-1');const replay=await second.json();
-    assert.equal(first.status,200);assert.equal(second.status,200);assert.match(second.headers.get('content-type'),/^application\/json/);assert.deepEqual(replay,original);assert.equal(calls,1);
-    const reordered=await send({messages:[{content:'你好',role:'user'}],model:'qwen-instruct'},'chat-retry-1');
-    assert.equal(reordered.status,200);assert.deepEqual(await reordered.json(),original);assert.equal(calls,1);
-    const conflict=await send({...request,messages:[{role:'user',content:'另一个问题'}]},'chat-retry-1');
-    assert.equal(conflict.status,409);assert.equal((await conflict.json()).error.param,'Idempotency-Key');assert.equal(calls,1);
-  });
-});
-test('并发幂等请求只调用一次上游，流式输出可重放',async()=>{
-  let release,started,calls=0;const gate=new Promise(resolve=>{release=resolve;}),entered=new Promise(resolve=>{started=resolve;});
-  await withServer(async()=>{calls++;started();await gate;return new Response(sse([chunk('完成','stop'),'[DONE]']),{headers:{'content-type':'text/event-stream'}});},async(_call,base)=>{
-    const send=()=>fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json','Idempotency-Key':'stream-retry-1'},body:JSON.stringify({...request,stream:true})});
-    const first=send();await entered;const second=send();
-    try{release();const [original,replay]=await Promise.all([first,second]);assert.equal(original.status,200);assert.equal(replay.status,200);assert.match(replay.headers.get('content-type'),/^text\/event-stream/);assert.equal(await replay.text(),await original.text());assert.equal(calls,1);}finally{release();}
-  });
-});
-test('流式幂等请求已输出内容后失败时拒绝再次调用模型',async()=>{
-  let calls=0;
-  await withServer(async()=>{calls++;return new Response(sse([chunk('部分')]),{headers:{'content-type':'text/event-stream'}});},async(_call,base)=>{
-    const send=()=>fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json','Idempotency-Key':'partial-failure-1'},body:JSON.stringify({...request,stream:true})});
-    const first=await send();assert.equal(first.status,200);
-    const output=await first.text();assert.match(output,/部分/);assert.match(output,/upstream_error/);
-    const replay=await send();assert.equal(replay.status,409);
-    assert.equal((await replay.json()).error.param,'Idempotency-Key');
-  },{upstreamRetries:0});
-  assert.equal(calls,1);
-});
-test('幂等请求已触达上游但响应头尚未发送时失败也不重复调用模型',async()=>{
-  let calls=0;
-  await withServer(async()=>{calls++;return new Response('',{status:502});},async(_call,base)=>{
-    const send=()=>fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json','Idempotency-Key':'upstream-failure-1'},body:JSON.stringify(request)});
-    assert.equal((await send()).status,502);
-    const replay=await send();assert.equal(replay.status,409);
-    assert.equal((await replay.json()).error.param,'Idempotency-Key');
-  },{upstreamRetries:0});
-  assert.equal(calls,1);
-});
-test('幂等请求在响应开始前校验失败不会锁定键',async()=>{
-  let calls=0;
-  await withServer(async()=>{calls++;return new Response(sse([chunk('成功','stop')]),{headers:{'content-type':'text/event-stream'}});},async(_call,base)=>{
-    const send=body=>fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json','Idempotency-Key':'invalid-then-valid-1'},body:JSON.stringify(body)});
-    assert.equal((await send({...request,stream:'yes'})).status,400);
-    assert.equal((await send({...request,stream:'yes'})).status,400);
-    const valid=await send(request);assert.equal(valid.status,200);
-    assert.equal((await valid.json()).choices[0].message.content,'成功');
-  });
-  assert.equal(calls,1);
 });
 test('健康检查按需探测真实模型目录，并短时复用探测结果',async()=>{
   let probes=0;
@@ -618,19 +450,6 @@ test('上游探测失败返回降级状态且不泄露上游错误',async()=>{
     const body=await response.json();assert.equal(body.status,'degraded');assert.equal(body.upstream_status,'unavailable');
     assert.doesNotMatch(JSON.stringify(body),/private upstream detail/);
   },{modelFetcher:async()=>{throw new Error('private upstream detail');}});
-});
-test('Prometheus 指标需要本地密钥且仅含低基数标签',async()=>{
-  await withServer(async()=>{throw new Error('不应访问上游');},async(_call,base)=>{
-    assert.equal((await fetch(base+'/metrics')).status,401);
-    await fetch(base+'/healthz');
-    const response=await fetch(base+'/metrics',{headers:{authorization:`Bearer ${config.key}`}});
-    assert.equal(response.status,200);assert.match(response.headers.get('content-type'),/text\/plain/);
-    const body=await response.text();
-    assert.match(body,/shtech_http_requests_total\{method="GET",status="401"\} 1/);
-    assert.match(body,/shtech_http_request_duration_seconds_bucket\{le="\+Inf"\}/);
-    assert.match(body,/shtech_queue_active 0/);
-    assert.doesNotMatch(body,/healthz|\/metrics|local-test|upstream-test/);
-  });
 });
 test('错误响应提供请求 ID、稳定错误码和鉴权头',async()=>{
   await withServer(async()=>{throw new Error('不应调用上游');},async(_call,base)=>{
@@ -680,29 +499,6 @@ test('图片输入上传后转换为 Webchat 图片字段',async()=>{
   },async call=>{
     const response=await call({...request,messages:[{role:'user',content:[{type:'text',text:'看图'},{type:'image_url',image_url:{url:`data:image/png;base64,${png}`}}]}]});assert.equal(response.status,200);
   },{uploadToken:'upload-token',imageFetcher:async()=>{uploads++;return new Response(JSON.stringify({success:true,result:{url:'test.png',width:1,height:1}}),{headers:{'content-type':'application/json'}});}});
-  assert.equal(uploads,1);
-});
-test('自动缩减历史后不再上传被丢弃轮次的图片',async()=>{
-  const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-  const modelFetcher=async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:2000}]}});
-  let uploads=0;
-  await withServer(async(_,options)=>{
-    const body=JSON.parse(options.body);
-    assert.equal(body.chatInfo,'查看新图\n[Image attached]');
-    assert.equal(body.messages.some(message=>message.content?.includes('旧图')),false);
-    assert.equal(body.imageUrls.length,1);
-    return new Response(sse([chunk('已查看','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const image={type:'image_url',image_url:{url:`data:image/png;base64,${png}`}};
-    const response=await call({model:'qwen-instruct',max_tokens:30,messages:[
-      {role:'user',content:[{type:'text',text:'旧图'.repeat(500)},image]},
-      {role:'assistant',content:'已查看旧图'},
-      {role:'user',content:[{type:'text',text:'查看新图'},image]}
-    ]});
-    assert.equal(response.status,200);
-  },{modelFetcher,uploadToken:'retained-image-test-token',imageFetcher:async()=>{
-    uploads++;return new Response(JSON.stringify({success:true,result:{url:`test-${uploads}.png`}}),{headers:{'content-type':'application/json'}});
-  }});
   assert.equal(uploads,1);
 });
 test('图片成本超过模型窗口时在上传前拒绝请求',async()=>{
@@ -865,29 +661,6 @@ test('Responses compact 未指定模型时使用当前目录默认模型，并�
     assert.deepEqual(routed,[kimiAvailable?'school-kimi-route':'campus-code','campus-code']);
   }
 });
-test('Vector Stores API 为 Responses file_search 注入检索结果',async()=>{
-  const searched=[];
-  await withServer(async(_url,options)=>{
-    const body=JSON.parse(options.body);searched.push(body.messages.some(message=>message.role==='system'&&message.content.includes('blue-green deployment')));assert.equal(body.chatInfo,'How should production be deployed?');
-    return new Response(sse([chunk('Use blue-green deployment.','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async(_call,base)=>{
-    const auth={authorization:`Bearer ${config.key}`},jsonHeaders={...auth,'content-type':'application/json'};
-    const form=new FormData();form.set('purpose','assistants');form.set('file',new File(['Production uses blue-green deployment and keeps the previous image for rollback.'],'runbook.md',{type:'text/markdown'}));
-    const file=await(await fetch(`${base}/v1/files`,{method:'POST',headers:auth,body:form})).json();
-    const store=await(await fetch(`${base}/v1/vector_stores`,{method:'POST',headers:jsonHeaders,body:JSON.stringify({name:'runbooks',file_ids:[file.id]})})).json();
-    assert.match(store.id,/^vs_/);assert.equal(store.file_counts.completed,1);
-    const search=await(await fetch(`${base}/v1/vector_stores/${store.id}/search`,{method:'POST',headers:jsonHeaders,body:JSON.stringify({query:'production deployment'})})).json();assert.equal(search.data[0].filename,'runbook.md');
-    const response=await(await fetch(`${base}/v1/responses`,{method:'POST',headers:jsonHeaders,body:JSON.stringify({model:'qwen-instruct',input:'How should production be deployed?',tools:[{type:'file_search',vector_store_ids:[store.id]}],include:['file_search_call.results'],store:false})})).json();
-    assert.equal(response.output_text,'Use blue-green deployment.');const call=response.output.find(item=>item.type==='file_search_call');assert.equal(call.status,'completed');assert.equal(call.results[0].file_id,file.id);
-    const disabled=await(await fetch(`${base}/v1/responses`,{method:'POST',headers:jsonHeaders,body:JSON.stringify({model:'qwen-instruct',input:'How should production be deployed?',tools:[{type:'file_search',vector_store_ids:[store.id]}],tool_choice:'none',store:false})})).json();
-    assert.equal(disabled.output.some(item=>item.type==='file_search_call'),false);
-    const required=await(await fetch(`${base}/v1/responses`,{method:'POST',headers:jsonHeaders,body:JSON.stringify({model:'qwen-instruct',input:'How should production be deployed?',tools:[{type:'file_search',vector_store_ids:[store.id]}],tool_choice:'required',store:false})})).json();
-    assert.ok(required.output.some(item=>item.type==='file_search_call'));
-    assert.deepEqual(searched,[true,false,true]);
-    const listed=await(await fetch(`${base}/v1/vector_stores/${store.id}/files`,{headers:auth})).json();assert.equal(listed.data[0].id,file.id);
-    assert.equal((await fetch(`${base}/v1/vector_stores/${store.id}`,{method:'DELETE',headers:auth})).status,200);
-  });
-});
 test('Responses 默认保存 reasoning，并用 item_reference 续接 OpenCode 会话',async()=>{
   let calls=0;
   await withServer(async(_url,options)=>{
@@ -1026,15 +799,6 @@ test('流式输出保留分块并产生单个 DONE',async () => {
     assert.equal(frames.filter(frame=>frame.data==='[DONE]').length,1);
     assert.ok(frames.slice(0,-1).every(frame=>JSON.parse(frame.data).choices[0].delta.role==='assistant'));
     assert.equal(frames.map(frame=>frame.data).join('').includes('chat.completion.chunk'),true);
-  });
-});
-test('Legacy Completions 支持 JSON 和 SSE 文本格式',async()=>{
-  await withServer(async()=>new Response(sse([chunk('42'),chunk('','stop'),'[DONE]']),{headers:{'content-type':'text/event-stream'}}),async(call,base)=>{
-    const headers={authorization:`Bearer ${config.key}`,'content-type':'application/json'};
-    const json=await fetch(base+'/v1/completions',{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',prompt:'answer = '})});
-    const value=await json.json();assert.equal(value.object,'text_completion');assert.equal(value.choices[0].text,'42');
-    const stream=await fetch(base+'/v1/completions',{method:'POST',headers,body:JSON.stringify({model:'qwen-instruct',prompt:'answer = ',stream:true})});
-    const frames=await Array.fromAsync(events(stream.body));assert.equal(JSON.parse(frames[0].data).choices[0].text,'42');assert.equal(frames.at(-1).data,'[DONE]');
   });
 });
 test('Chat 接受 max_completion_tokens 并按标准发送流式 usage 尾块',async()=>{
@@ -1271,89 +1035,6 @@ test('上游 401 刷新凭证并仅重试一次',async()=>{
     return new Response(sse([chunk('ok','stop')]),{headers:{'Content-Type':'text/event-stream'}});
   },async call=>{assert.equal((await call()).status,200);assert.equal(attempts,2);assert.equal(logins,1);},{tokenManager:manager});
 });
-test('上游在输出前的临时故障有限重试',async()=>{
-  let attempts=0;
-  await withServer(async()=>++attempts<3?new Response('',{status:503}):new Response(sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
-    const response=await call();assert.equal(response.status,200);assert.equal((await response.json()).choices[0].message.content,'恢复');assert.equal(attempts,3);
-  },{upstreamRetries:2,timeout:5000});
-});
-test('上游连接在响应前重置时有限重试，证书错误不重试',async()=>{
-  let attempts=0;
-  await withServer(async()=>{
-    if(++attempts===1)throw Object.assign(new Error('connection reset'),{code:'ECONNRESET'});
-    return new Response(sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call();assert.equal(response.status,200);
-    assert.equal((await response.json()).choices[0].message.content,'恢复');
-  },{upstreamRetries:2,timeout:5000});
-  assert.equal(attempts,2);
-  attempts=0;
-  await withServer(async()=>{attempts++;throw Object.assign(new Error('certificate invalid'),{code:'ERR_TLS_CERT_ALTNAME_INVALID'});},async call=>{
-    assert.equal((await call()).status,502);
-  },{upstreamRetries:2,timeout:5000});
-  assert.equal(attempts,1);
-});
-test('SSE 首事件前断流可重试，已输出事件后不重放',async()=>{
-  let attempts=0;
-  await withServer(async()=>{
-    if(++attempts===1)return new Response(new ReadableStream({pull(controller){controller.error(Object.assign(new Error('stream reset'),{code:'ECONNRESET'}));}}),{headers:{'content-type':'text/event-stream'}});
-    return new Response(sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call();assert.equal(response.status,200);
-    assert.equal((await response.json()).choices[0].message.content,'恢复');
-  },{upstreamRetries:2,timeout:5000});
-  assert.equal(attempts,2);
-  attempts=0;
-  let failUpstream;
-  await withServer(async()=>{
-    attempts++;
-    return new Response(new ReadableStream({start(controller){
-      controller.enqueue(new TextEncoder().encode(sse([chunk('部分')])));
-      failUpstream=()=>controller.error(Object.assign(new Error('stream reset'),{code:'ECONNRESET'}));
-    }}),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call({...request,stream:true});assert.equal(response.status,200);
-    const reader=response.body.getReader(),decoder=new TextDecoder();let output='';
-    while(!output.includes('部分')){const part=await reader.read();assert.equal(part.done,false);output+=decoder.decode(part.value,{stream:true});}
-    failUpstream();
-    for(let part;!(part=await reader.read()).done;)output+=decoder.decode(part.value,{stream:true});
-    assert.match(output,/upstream_error/);
-  },{upstreamRetries:2,timeout:5000});
-  assert.equal(attempts,1);
-});
-test('首个 choices 前只有元数据时断流可重试且不沿用旧用量',async()=>{
-  let attempts=0;
-  await withServer(async()=>{
-    if(++attempts===1){
-      let reads=0;
-      return new Response(new ReadableStream({pull(controller){
-        if(reads++===0)controller.enqueue(new TextEncoder().encode(sse([{usage:{prompt_tokens:999,completion_tokens:999}}])));
-        else controller.error(Object.assign(new Error('stream reset'),{code:'ECONNRESET'}));
-      }}),{headers:{'content-type':'text/event-stream'}});
-    }
-    return new Response(sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call();assert.equal(response.status,200);
-    const result=await response.json();assert.equal(result.choices[0].message.content,'恢复');
-    assert.notEqual(result.usage.prompt_tokens,999);
-  },{upstreamRetries:1,timeout:5000});
-  assert.equal(attempts,2);
-});
-test('上游返回空 SSE 时使用同一重试预算',async()=>{
-  let attempts=0;
-  await withServer(async()=>++attempts===1
-    ?new Response('',{headers:{'content-type':'text/event-stream'}})
-    :new Response(sse([chunk('恢复','stop')]),{headers:{'content-type':'text/event-stream'}}),async call=>{
-    const response=await call();assert.equal(response.status,200);
-    assert.equal((await response.json()).choices[0].message.content,'恢复');
-  },{upstreamRetries:1,timeout:5000});
-  assert.equal(attempts,2);
-  await withServer(async()=>new Response('',{headers:{'content-type':'text/event-stream'}}),async call=>{
-    const response=await call();assert.equal(response.status,502);
-    assert.equal((await response.json()).error.code,'upstream_error');
-  },{upstreamRetries:0,timeout:5000});
-});
-
 test('SSE 中 token 失效在输出前刷新一次，并关闭被拒绝的流',async()=>{
   let attempts=0,refreshes=0,cancelled=false;
   const manager=new TokenManager({token:'initial',username:'user',password:'mock'},async()=>{refreshes++;return 'refreshed';});
@@ -1490,124 +1171,6 @@ test('Chat 流在上游缺失或变更 ID 时保持同一响应标识',async()=>
       assert.deepEqual(frames.at(-1).choices,[]);
     });
   }
-});
-test('可选工具参数修复只额外请求上游一次',async()=>{
-  let attempts=0;
-  const tools=[{type:'function',function:{name:'weather',parameters:{type:'object',properties:{city:{type:'string'}},required:['city'],additionalProperties:false}}}];
-  await withServer(async(_url,options)=>{
-    attempts++;
-    if(attempts===2){const correction=JSON.parse(options.body);assert.match(correction.chatInfo,/JSON Schema/);assert.match(correction.messages.at(-1).content,/"city":1/);}
-    const answer=attempts===1?'<api_tool_call>{"name":"weather","arguments":{"city":1}}</api_tool_call>':'<api_tool_call>{"name":"weather","arguments":{"city":"上海"}}</api_tool_call>';
-    return new Response(sse([chunk(answer,'stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call({...request,tools,tool_choice:'required'});
-    assert.equal(response.status,200);
-    const result=await response.json();assert.deepEqual(JSON.parse(result.choices[0].message.tool_calls[0].function.arguments),{city:'上海'});
-  },{outputRepair:true});
-  assert.equal(attempts,2);
-});
-test('Responses Agent 工具字段错误在发送前修复一次',async()=>{
-  for(const stream of [false,true]){
-    let attempts=0;
-    await withServer(async(_url,options)=>{
-      attempts++;
-      if(attempts===2)assert.match(JSON.parse(options.body).chatInfo,/local_shell\.action/);
-      const action={type:'exec',command:['git','status'],timeout_ms:attempts===1?'forever':1000};
-      const answer=`<api_tool_call>${JSON.stringify({name:'__openai_local_shell',arguments:{action}})}</api_tool_call>`;
-      return new Response(sse([chunk(answer,'stop')]),{headers:{'content-type':'text/event-stream'}});
-    },async(_call,base)=>{
-      const response=await fetch(`${base}/v1/responses`,{method:'POST',headers:{authorization:`Bearer ${config.key}`,'content-type':'application/json'},body:JSON.stringify({model:'qwen-instruct',input:'检查仓库',tools:[{type:'local_shell'}],stream})});
-      assert.equal(response.status,200);
-      const result=stream?(await Array.fromAsync(events(response.body))).map(frame=>JSON.parse(frame.data)).at(-1).response:await response.json();
-      assert.equal(result.output[0].type,'local_shell_call');
-      assert.equal(result.output[0].action.timeout_ms,1000);
-    },{outputRepair:true});
-    assert.equal(attempts,2);
-  }
-});
-test('流式工具修复缓冲原始文本，修复成功后才输出客户端事件',async()=>{
-  const tools=[{type:'function',function:{name:'weather',parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}}];
-  let attempts=0;
-  await withServer(async()=>{attempts++;return new Response(sse([chunk(`<api_tool_call>{"name":"weather","arguments":{"city":${attempts===1?'1':'"上海"'}}}</api_tool_call>`,'stop')]),{headers:{'content-type':'text/event-stream'}});},async call=>{
-    const response=await call({...request,tools,stream:true});
-    const output=await response.text();assert.match(output,/tool_calls/);assert.match(output,/\[DONE\]/);
-  },{outputRepair:true});
-  assert.equal(attempts,2);
-  attempts=0;
-  await withServer(async()=>{attempts++;return new Response(sse(attempts===1?[chunk('原始无效答案'),chunk('<api_tool_call>{"name":"weather","arguments":{"city":1}}</api_tool_call>','stop')]:[chunk('<api_tool_call>{"name":"weather","arguments":{"city":"上海"}}</api_tool_call>','stop')]),{headers:{'content-type':'text/event-stream'}});},async call=>{
-    const response=await call({...request,tools,stream:true});
-    const output=await response.text();assert.doesNotMatch(output,/原始无效答案|upstream_error/);assert.match(output,/tool_calls/);assert.match(output,/\[DONE\]/);
-  },{outputRepair:true});
-  assert.equal(attempts,2);
-});
-
-test('流式修复不先发送有效调用再重复执行修复后的调用',async()=>{
-  const tools=[{type:'function',function:{name:'weather',parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}}];
-  let attempts=0;
-  const valid='<api_tool_call>{"id":"call_first","name":"weather","arguments":{"city":"上海"}}</api_tool_call>';
-  const invalid='<api_tool_call>{"name":"weather","arguments":{"city":1}}</api_tool_call>';
-  await withServer(async()=>{
-    attempts++;return new Response(sse([chunk(valid),chunk(attempts===1?invalid:'','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call({...request,tools,stream:true});assert.equal(response.status,200);
-    const frames=(await Array.fromAsync(events(response.body))).filter(frame=>frame.data!=='[DONE]').map(frame=>JSON.parse(frame.data));
-    const calls=frames.flatMap(frame=>frame.choices?.[0]?.delta?.tool_calls??[]);
-    assert.equal(calls.length,1);assert.equal(calls[0].id,'call_first');assert.equal(calls[0].index,0);
-  },{outputRepair:true});
-  assert.equal(attempts,2);
-});
-test('可选结构化输出修复携带具体 Schema 错误',async()=>{
-  let attempts=0;
-  await withServer(async(_url,options)=>{
-    attempts++;
-    if(attempts===2)assert.match(JSON.parse(options.body).chatInfo,/\$\.name 类型错误/);
-    return new Response(sse([chunk(attempts===1?'{"name":3}':'{"name":"修复"}','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call({...request,response_format:{type:'json_schema',json_schema:{name:'answer',schema:{type:'object',properties:{name:{type:'string'}},required:['name'],additionalProperties:false}}}});
-    assert.equal(response.status,200);assert.equal(JSON.parse((await response.json()).choices[0].message.content).name,'修复');
-  },{outputRepair:true});
-  assert.equal(attempts,2);
-});
-test('修复后的答案仍无效时不进行第三次模型调用',async()=>{
-  let attempts=0;
-  await withServer(async()=>{attempts++;return new Response(sse([chunk('{"name":3}','stop')]),{headers:{'content-type':'text/event-stream'}});},async call=>{
-    const response=await call({...request,response_format:{type:'json_schema',json_schema:{name:'answer',schema:{type:'object',properties:{name:{type:'string'}},required:['name']}}}});
-    assert.equal(response.status,502);
-  },{outputRepair:true});
-  assert.equal(attempts,2);
-});
-
-test('自动修复按模型窗口缩减无效答案，保留请求及校验错误',async()=>{
-  const modelFetcher=async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:3000}]}});
-  let attempts=0;
-  await withServer(async(_url,options)=>{
-    attempts++;const body=JSON.parse(options.body);
-    if(attempts===2){
-      const promptTokens=Math.ceil(Buffer.byteLength(JSON.stringify({messages:body.messages,chatInfo:body.chatInfo}))/3);
-      assert.ok(promptTokens+body.maxToken<=3000);
-      assert.match(body.chatInfo,/\$\.name 类型错误/);
-      assert.ok(body.messages.some(message=>message.role==='user'&&message.content.includes('分析代码')));
-      assert.match(body.messages.at(-1).content,/middle omitted/);
-      assert.match(body.messages.at(-1).content,/"name":3/);
-    }
-    return new Response(sse([chunk(attempts===1?JSON.stringify({name:3,padding:'x'.repeat(30000)}):'{"name":"修复"}','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call({...request,messages:[{role:'user',content:'分析代码'}],max_tokens:100,response_format:{type:'json_schema',json_schema:{name:'answer',schema:{type:'object',properties:{name:{type:'string'}},required:['name']}}}});
-    assert.equal(response.status,200);assert.equal(JSON.parse((await response.json()).choices[0].message.content).name,'修复');
-  },{modelFetcher,outputRepair:true});
-  assert.equal(attempts,2);
-});
-
-test('修复说明和最新请求仍超出窗口时不发送第二次上游请求',async()=>{
-  const modelFetcher=async()=>({success:true,result:{records:[{aiType:'qwen-instruct',rootAiType:'xinference',maxToken:300}]}});
-  let attempts=0;
-  await withServer(async()=>{
-    attempts++;return new Response(sse([chunk('{"name":3}','stop')]),{headers:{'content-type':'text/event-stream'}});
-  },async call=>{
-    const response=await call({...request,max_tokens:150,response_format:{type:'json_schema',json_schema:{name:'answer',schema:{type:'object',properties:{name:{type:'string'}},required:['name']}}}});
-    assert.equal(response.status,502);assert.match((await response.json()).error.message,/修复请求超过模型上下文窗口/);
-  },{modelFetcher,outputRepair:true});
-  assert.equal(attempts,1);
 });
 test('聚合上游原生工具调用分片并保留 ID',async()=>{
   const tools=[{type:'function',function:{name:'weather',parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}}];
