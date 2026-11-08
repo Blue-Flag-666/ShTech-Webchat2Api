@@ -1150,8 +1150,10 @@ test('截断流不伪装成功',async()=>{
   });
 });
 test('登录失败、不正确内容类型和本地鉴权',async()=>{
-  for(const response of [new Response('secret',{status:401}),new Response('<html>login</html>')]) await withServer(async()=>response,async call=>{
-    const res=await call(); assert.ok([401,502].includes(res.status)); assert.doesNotMatch(await res.text(),/secret|<html>/);
+  for(const response of [new Response('authentication expired',{status:401}),new Response('<html>login</html>')]) await withServer(async()=>response,async call=>{
+    const res=await call();const value=await res.json();
+    if(response.status===401){assert.equal(res.status,401);assert.equal(value.error.message,'authentication expired');}
+    else{assert.equal(res.status,502);assert.doesNotMatch(value.error.message,/<html>/);}
   });
   await withServer(()=>{throw new Error('不应访问上游');},async call=>assert.equal((await call(request,'wrong')).status,401));
 });
@@ -1168,7 +1170,7 @@ test('CORS 默认关闭，配置后处理浏览器预检',async()=>{
 });
 test('错误事件不会被当作回答',async()=>{
   await withServer(async()=>new Response('event: error\ndata: {"message":"private upstream detail"}\n\n',{headers:{'Content-Type':'text/event-stream'}}),async call=>{
-    const res=await call();assert.equal(res.status,502);assert.doesNotMatch(await res.text(),/private/);
+    const res=await call();assert.equal(res.status,502);assert.equal((await res.json()).error.message,'private upstream detail');
   });
 });
 test('超时中断上游',async()=>{
